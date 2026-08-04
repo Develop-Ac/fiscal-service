@@ -249,19 +249,48 @@ export class IcmsController {
             throw new NotFoundException(`Guia não encontrada para a NF: ${chaveNfe}`);
         }
 
-        const utf8FileName = String(payload.fileName || 'guia.pdf');
+        res.set(this.cabecalhoPdf(payload.fileName));
+
+        return new StreamableFile(payload.stream);
+    }
+
+    /**
+     * Guias do ICMS-ST escaneadas no app de Movimento Fiscal e amarradas a esta NF.
+     * S\u00f3 leitura: o PDF pertence ao arquivo fiscal, n\u00e3o se apaga por aqui.
+     */
+    @Get('guia/:chaveNfe/escaneadas')
+    async getGuiasEscaneadas(@Param('chaveNfe') chaveNfe: string) {
+        const guias = await this.service.getGuiasEscaneadasByNfe(chaveNfe);
+        return { count: guias.length, guias };
+    }
+
+    @Get('guia-escaneada/:id/download')
+    async downloadGuiaEscaneada(
+        @Param('id') id: string,
+        @Res({ passthrough: true }) res: Response,
+    ) {
+        const payload = await this.service.downloadGuiaEscaneada(Number(id));
+        if (!payload) {
+            throw new NotFoundException(`Guia escaneada n\u00e3o encontrada: ${id}`);
+        }
+
+        res.set(this.cabecalhoPdf(payload.fileName));
+
+        return new StreamableFile(payload.stream);
+    }
+
+    /** Content-Disposition com nome ASCII de fallback + o nome real em UTF-8. */
+    private cabecalhoPdf(fileName?: string | null) {
+        const utf8FileName = String(fileName || 'guia.pdf');
         const asciiFallback = utf8FileName
             .normalize('NFD')
             .replace(/[\u0300-\u036f]/g, '')
             .replace(/[^a-zA-Z0-9_.-]/g, '_') || 'guia.pdf';
-        const encodedUtf8FileName = encodeURIComponent(utf8FileName);
 
-        res.set({
+        return {
             'Content-Type': 'application/pdf',
-            'Content-Disposition': `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodedUtf8FileName}`,
-        });
-
-        return new StreamableFile(payload.stream);
+            'Content-Disposition': `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(utf8FileName)}`,
+        };
     }
 
     @Delete('guia/:chaveNfe')

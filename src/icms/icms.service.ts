@@ -4057,6 +4057,121 @@ export class IcmsService {
         return true;
     }
 
+    // ---------------------------------------------------------------------------
+    // Guias escaneadas no app de Movimento Fiscal (escaner-fiscal-app)
+    // ---------------------------------------------------------------------------
+    // O app de scan grava o PDF no MinIO e o registro em `esc_documento`, amarrando
+    // a guia à nota pelo número + fornecedor (ou pela chave, quando a nota foi
+    // escolhida na busca). Aqui a NF já vem identificada pela CHAVE, e dela saem os
+    // dois dados do vínculo: número (posições 26-34) e CNPJ do emitente (7-20).
+    // São guias do arquivo fiscal — esta tela só as EXIBE, nunca apaga.
+
+    private static readonly TIPO_GUIA_ESCANEADA = 'guia-icms-st';
+
+    private dadosDaChaveNfe(chaveNfe: string) {
+        const chave = String(chaveNfe || '').replace(/\D/g, '');
+        if (chave.length !== 44) return null;
+        return {
+            chave,
+            numero: chave.slice(25, 34).replace(/^0+/, ''),
+            cnpjEmitente: chave.slice(6, 20),
+        };
+    }
+
+    /**
+     * A tabela do app de scan pode ainda não existir neste banco (DDL é manual na
+     * org). Falta dela não pode derrubar a tela da NF — vira lista vazia.
+     */
+    private semTabelaDoScan(error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const ausente = /esc_documento/i.test(msg) && /(does not exist|não existe|nao existe|42P01)/i.test(msg);
+        if (ausente) {
+            this.logger.warn(`esc_documento indisponível — guias escaneadas não listadas (${msg}).`);
+        }
+        return ausente;
+    }
+
+    async getGuiasEscaneadasByNfe(chaveNfe: string) {
+        const dados = this.dadosDaChaveNfe(chaveNfe);
+        if (!dados) return [];
+
+        let rows: any[] = [];
+        try {
+            rows = await this.prisma.$queryRawUnsafe<any[]>(
+                `
+                SELECT
+                    id,
+                    -- DATE vira Date de meia-noite LOCAL; converter no banco evita que o
+                    -- fuso do processo empurre a data um dia para trás.
+                    to_char(data_documento, 'YYYY-MM-DD') AS data_documento,
+                    descricao, minio_bucket, minio_key, nome_arquivo,
+                    tamanho_bytes, nf_numero, chave_nfe, fornecedor_nome, fornecedor_cnpj,
+                    for_codigo, criado_em,
+                    CASE WHEN chave_nfe = $1 THEN 'chave' ELSE 'numero_cnpj' END AS vinculo
+                FROM esc_documento
+                WHERE tipo = $4
+                  AND (chave_nfe = $1 OR (nf_numero = $2 AND fornecedor_cnpj = $3))
+                ORDER BY criado_em DESC
+                `,
+                dados.chave,
+                dados.numero,
+                dados.cnpjEmitente,
+                IcmsService.TIPO_GUIA_ESCANEADA,
+            );
+        } catch (error) {
+            if (this.semTabelaDoScan(error)) return [];
+            throw error;
+        }
+
+        return rows.map((r) => ({
+            // id é BIGSERIAL: sem o Number() vira BigInt e o JSON.stringify quebra.
+            id: Number(r.id),
+            data_documento: String(r.data_documento ?? ''),
+            descricao: r.descricao ?? null,
+            nome_arquivo: r.nome_arquivo ?? null,
+            tamanho_bytes: r.tamanho_bytes == null ? null : Number(r.tamanho_bytes),
+            nf_numero: r.nf_numero ?? null,
+            chave_nfe: r.chave_nfe ?? null,
+            fornecedor_nome: r.fornecedor_nome ?? null,
+            fornecedor_cnpj: r.fornecedor_cnpj ?? null,
+            for_codigo: r.for_codigo == null ? null : Number(r.for_codigo),
+            criado_em: r.criado_em instanceof Date ? r.criado_em.toISOString() : String(r.criado_em ?? ''),
+            vinculo: r.vinculo as 'chave' | 'numero_cnpj',
+        }));
+    }
+
+    async downloadGuiaEscaneada(id: number) {
+        const idNum = Number(id);
+        if (!Number.isInteger(idNum) || idNum <= 0) return null;
+
+        let rows: any[] = [];
+        try {
+            rows = await this.prisma.$queryRawUnsafe<any[]>(
+                `
+                SELECT minio_bucket, minio_key, nome_arquivo
+                FROM esc_documento
+                WHERE id = $1 AND tipo = $2
+                `,
+                idNum,
+                IcmsService.TIPO_GUIA_ESCANEADA,
+            );
+        } catch (error) {
+            if (this.semTabelaDoScan(error)) return null;
+            throw error;
+        }
+
+        const doc = rows[0];
+        if (!doc?.minio_key) return null;
+
+        // O bucket vem do próprio registro (o app de scan usa `movimento-fiscal`,
+        // não o bucket das guias anexadas aqui).
+        const client = this.getMinioClient();
+        const stream = await client.getObject(doc.minio_bucket || this.minioBucket, doc.minio_key);
+        const fileName = this.normalizeUploadedFileName(doc.nome_arquivo || `guia-escaneada-${idNum}.pdf`);
+
+        return { stream, fileName };
+    }
+
     async generateDanfe(xml: string): Promise<Buffer> {
         return new Promise(async (resolve, reject) => {
             try {
