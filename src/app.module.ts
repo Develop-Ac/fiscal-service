@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { PrometheusModule } from '@willsoto/nestjs-prometheus';
+
 import { IcmsModule } from './icms/icms.module';
 import { NfseModule } from './nfse/nfse.module';
 import { CteModule } from './cte/cte.module';
@@ -16,6 +18,10 @@ import { OpenQueryModule } from './shared/database/openquery/openquery.module';
         IcmsModule,
         NfseModule,
         CteModule,
+
+        PrometheusModule.register({
+            defaultMetrics: { enabled: true }, // CPU, memória, event loop, GC
+        }),
     ],
 })
 export class AppModule { }
