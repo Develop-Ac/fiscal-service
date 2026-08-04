@@ -1,6 +1,6 @@
 # Documentação de Desenvolvimento - Calculadora ICMS ST Service
 
-Este documento serve como guia para o desenvolvimento e manutenção da API `calculadora-st-service`.
+Este documento serve como guia para o desenvolvimento e manutenção da API `fiscal-service`.
 
 ## Visão Geral
 

@@ -1,5 +1,5 @@
 {
-    "name": "calculadora-st-service",
+    "name": "fiscal-service",
     "version": "1.0.0",
     "description": "Backend NestJS para Calculadora ICMS ST",
     "main": "dist/main.js",
