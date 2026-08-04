@@ -37,10 +37,11 @@ O host novo precisa existir e ser confiável **antes** de você apontar alguém 
 2. Certificado da CA interna cobrindo o host novo — ver `certificados-intranet/`. Se o SAN
    não cobrir, o navegador barra e **parece serviço fora do ar**, não erro de certificado.
 
-Teste antes de seguir:
+Teste antes de seguir (o serviço tem prefixo global `/api` — ver `setGlobalPrefix` em
+`src/main.ts`, então **toda** rota vive sob `/api`):
 
 ```bash
-curl -I https://fiscal-service.acacessorios.local/icms/payment-status
+curl -I http://fiscal-service.acacessorios.local/api/icms/payment-status
 ```
 
 ---
@@ -75,6 +76,17 @@ O que muda é nos dois consumidores:
 |---|---|---|---|
 | `cotacao-frontend` | `NEXT_PUBLIC_FISCAL_SERVICE_BASE` | mesma URL de `NEXT_PUBLIC_CALCULADORA_ST_BASE` | `NEXT_PUBLIC_CALCULADORA_ST_BASE` |
 | `financeiro-service` | `FISCAL_SERVICE_URL` | mesma URL de `CALCULADORA_ST_URL` (DANFSe do ADN) | `CALCULADORA_ST_URL` |
+
+O valor **termina em `/api`** — o serviço roda com `setGlobalPrefix('api')`, então o front
+monta `<base>/icms/...` e isso precisa cair em `/api/icms/...`. Mesmo padrão do
+`NEXT_PUBLIC_QUALIDADE_API_BASE`, que é `http://garantia-service.acacessorios.local/api`.
+
+O jeito seguro de preencher: **copie o valor da variável antiga e troque só o host.** Assim
+você não erra o esquema (`http`/`https`), a porta nem o `/api`.
+
+```
+NEXT_PUBLIC_FISCAL_SERVICE_BASE=http://fiscal-service.acacessorios.local/api
+```
 
 **Adicione a nova sem apagar a antiga.** Os dois serviços leem a nova primeiro e caem na
 antiga se ela não existir (`lib/services.ts` e `danfse.service.ts`). Assim, um ambiente
