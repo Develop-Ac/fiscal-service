@@ -71,11 +71,17 @@ export const PASTAS = {
 
 export type Pasta = (typeof PASTAS)[keyof typeof PASTAS];
 
-/** Pasta única dos DACTEs — o CT-e não é segmentado por natureza de operação. */
+/**
+ * Pastas dos demais documentos. Cada opção da tela grava na SUA pasta e em mais
+ * nenhuma — quem baixa o pacote consegue arquivar uma pasta inteira sem separar
+ * nada à mão. O CT-e e a NFS-e não são segmentados por natureza de operação: só
+ * a NF-e de entrada tem CFOP para isso.
+ */
 export const PASTA_CTE = '07-conhecimentos-de-transporte';
-
-/** Pasta única dos XMLs de entrada (NF-e e CT-e juntos). */
-export const PASTA_XML = 'xml-entradas';
+export const PASTA_NFSE = '08-notas-de-servico';
+export const PASTA_XML_NFE = 'xml-nfe-entrada';
+export const PASTA_XML_CTE = 'xml-cte-entrada';
+export const PASTA_XML_NFSE = 'xml-nfse';
 
 /** Rótulo legível de cada pasta, para a tela e o relatório. */
 export const ROTULO_PASTA: Record<string, string> = {
@@ -87,6 +93,7 @@ export const ROTULO_PASTA: Record<string, string> = {
     [PASTAS.TRANSFERENCIA]: 'Transferências',
     [PASTAS.OUTRAS]: 'Outras operações',
     [PASTA_CTE]: 'Conhecimentos de transporte (CT-e)',
+    [PASTA_NFSE]: 'Notas de serviço (NFS-e)',
 };
 
 /** Pasta de um único CFOP. */

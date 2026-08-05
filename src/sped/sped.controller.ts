@@ -22,7 +22,7 @@ const LIMITE_ARQUIVO = 200 * 1024 * 1024;
 export class SpedController {
     constructor(private readonly service: SpedService) { }
 
-    /** Prévia da classificação — lê só o arquivo, não consulta Postgres nem ERP. */
+    /** Prévia da classificação — não busca XML nem consulta o ERP. */
     @Post('analisar')
     @UseInterceptors(FileInterceptor('file', { limits: { fileSize: LIMITE_ARQUIVO } }))
     analisar(@UploadedFile() file?: any) {
@@ -42,7 +42,10 @@ export class SpedController {
             empresa?: string;
             danfe?: string;
             dacte?: string;
-            xml?: string;
+            danfse?: string;
+            xmlNfe?: string;
+            xmlCte?: string;
+            xmlNfse?: string;
             somentePostgres?: string;
         },
     ) {
@@ -50,11 +53,16 @@ export class SpedController {
             empresa: Number(body?.empresa ?? 1) || 1,
             danfe: this.bool(body?.danfe, true),
             dacte: this.bool(body?.dacte, true),
-            xml: this.bool(body?.xml, true),
+            danfse: this.bool(body?.danfse, true),
+            xmlNfe: this.bool(body?.xmlNfe, true),
+            xmlCte: this.bool(body?.xmlCte, true),
+            xmlNfse: this.bool(body?.xmlNfse, true),
             somentePostgres: this.bool(body?.somentePostgres, false),
         };
-        if (!opcoes.danfe && !opcoes.dacte && !opcoes.xml) {
-            throw new BadRequestException('Selecione ao menos um item para gerar (DANFE, DACTE ou XML).');
+        const algoMarcado =
+            opcoes.danfe || opcoes.dacte || opcoes.danfse || opcoes.xmlNfe || opcoes.xmlCte || opcoes.xmlNfse;
+        if (!algoMarcado) {
+            throw new BadRequestException('Selecione ao menos um item para gerar.');
         }
 
         const job = this.service.criarJob(this.conteudo(file), file.originalname, opcoes);

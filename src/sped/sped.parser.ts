@@ -43,6 +43,9 @@ export interface EmpresaSped {
     cnpj: string;
     uf: string;
     ie: string;
+    /** DT_INI e DT_FIN do 0000, em AAAA-MM-DD. Delimitam o mês do fechamento. */
+    dtInicio: string;
+    dtFim: string;
 }
 
 export interface SpedLido {
@@ -91,7 +94,15 @@ export function lerSped(conteudo: Buffer | string): SpedLido {
         const reg = f[1];
 
         if (reg === '0000') {
-            empresa = { nome: f[6], cnpj: f[7], uf: f[9], ie: f[10] };
+            // |0000|LAYOUT|COD_VER|COD_FIN|DT_INI|DT_FIN|NOME|CNPJ|CPF|UF|IE|…
+            empresa = {
+                nome: f[6],
+                cnpj: f[7],
+                uf: f[9],
+                ie: f[10],
+                dtInicio: dataIso(f[4]),
+                dtFim: dataIso(f[5]),
+            };
         } else if (reg === '0150') {
             participantes.set(f[2], { nome: f[3], cnpj: f[5], cpf: f[6] });
         } else if (reg === 'C100') {
