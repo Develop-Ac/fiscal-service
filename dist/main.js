@@ -105,7 +105,9 @@ async function bootstrap() {
         credentials: true,
         methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     });
-    app.setGlobalPrefix('api');
+    app.setGlobalPrefix('api', {
+        exclude: [{ path: 'metrics', method: common_1.RequestMethod.GET }],
+    });
     const config = new swagger_1.DocumentBuilder()
         .setTitle('Calculadora ICMS ST API')
         .setDescription('API para cálculo de ICMS ST e geração de DANFE')

@@ -21,6 +21,7 @@ exports.IcmsModule = IcmsModule = __decorate([
     (0, common_1.Module)({
         controllers: [icms_controller_1.IcmsController],
         providers: [icms_service_1.IcmsService, simples_nacional_service_1.SimplesNacionalService, icms_sync_cron_1.IcmsSyncCron, auditoria_ajustado_cron_1.AuditoriaAjustadoCron, auditoria_reauditoria_cron_1.AuditoriaReauditoriaCron],
+        exports: [icms_service_1.IcmsService],
     })
 ], IcmsModule);
 //# sourceMappingURL=icms.module.js.map

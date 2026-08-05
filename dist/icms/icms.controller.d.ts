@@ -20,6 +20,9 @@ export declare class IcmsController {
         TIPO_IMPOSTO: string;
         RASTREIO_SITUACAO: string;
     }[]>;
+    importXmlInvoices(body: {
+        xmls: string[];
+    }): Promise<any[]>;
     getInvoiceByKey(chaveNfe: string): Promise<{
         EMPRESA: number;
         CHAVE_NFE: string;
@@ -458,6 +461,25 @@ export declare class IcmsController {
         updated_at: any;
     }>;
     downloadGuiaByNfe(chaveNfe: string, res: Response): Promise<StreamableFile>;
+    getGuiasEscaneadas(chaveNfe: string): Promise<{
+        count: number;
+        guias: {
+            id: number;
+            data_documento: string;
+            descricao: any;
+            nome_arquivo: any;
+            tamanho_bytes: number;
+            nf_numero: any;
+            chave_nfe: any;
+            fornecedor_nome: any;
+            fornecedor_cnpj: any;
+            for_codigo: number;
+            criado_em: any;
+            vinculo: "chave" | "numero_cnpj";
+        }[];
+    }>;
+    downloadGuiaEscaneada(id: string, res: Response): Promise<StreamableFile>;
+    private cabecalhoPdf;
     removeGuiaByNfe(chaveNfe: string): Promise<{
         success: boolean;
         chaveNfe: string;

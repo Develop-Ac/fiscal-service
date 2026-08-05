@@ -9,5 +9,7 @@ import { SimplesNacionalService } from './simples-nacional.service';
 @Module({
     controllers: [IcmsController],
     providers: [IcmsService, SimplesNacionalService, IcmsSyncCron, AuditoriaAjustadoCron, AuditoriaReauditoriaCron],
+    // O SpedModule reusa o gerador de DANFE daqui em vez de ter o seu próprio.
+    exports: [IcmsService],
 })
 export class IcmsModule { }

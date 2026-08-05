@@ -53,6 +53,7 @@ export declare class IcmsService {
         XML_TIPO: "COMPLETO" | "RESUMO" | "SEM_XML";
         TIPO_IMPOSTO: string;
     }>;
+    importXmlInvoices(xmls: string[]): Promise<any[]>;
     private detectXmlType;
     startLaunchedInvoicesSyncJob(): Promise<{
         jobId: `${string}-${string}-${string}-${string}-${string}`;
@@ -596,6 +597,27 @@ export declare class IcmsService {
         fileName: string;
     }>;
     removeGuiaByNfe(chaveNfe: string): Promise<boolean>;
+    private static readonly TIPO_GUIA_ESCANEADA;
+    private dadosDaChaveNfe;
+    private semTabelaDoScan;
+    getGuiasEscaneadasByNfe(chaveNfe: string): Promise<{
+        id: number;
+        data_documento: string;
+        descricao: any;
+        nome_arquivo: any;
+        tamanho_bytes: number;
+        nf_numero: any;
+        chave_nfe: any;
+        fornecedor_nome: any;
+        fornecedor_cnpj: any;
+        for_codigo: number;
+        criado_em: any;
+        vinculo: "chave" | "numero_cnpj";
+    }[]>;
+    downloadGuiaEscaneada(id: number): Promise<{
+        stream: import("stream").Readable;
+        fileName: string;
+    }>;
     generateDanfe(xml: string): Promise<Buffer>;
     generateDanfeZip(invoices: {
         xml: string;

@@ -6,6 +6,8 @@ import { parseStringPromise } from 'xml2js';
 import { PrismaService } from '../prisma/prisma.service';
 import { NfseAdnClient, AdnDfeItem } from './nfse-adn.client';
 import { NfseCertService } from './nfse-cert.service';
+import { extrairNacional } from './danfse/nfse-nacional.extract';
+import { gerarDanfse } from './danfse/danfse-pdf';
 
 /**
  * Distribuição de NFS-e do Padrão Nacional via ADN.
@@ -640,8 +642,27 @@ export class NfseDistService {
     };
   }
 
-  async danfse(chave: string): Promise<Buffer> {
+  /**
+   * DANFSe da nota.
+   *
+   * `fonte = 'local'` (padrão) desenha o documento aqui, a partir do XML que a
+   * distribuição já guardou — não depende do ADN estar no ar nem do certificado
+   * a cada abertura, e vale para qualquer nota do acervo.
+   *
+   * `fonte = 'adn'` baixa o PDF oficial do portal nacional. Fica como escape para
+   * conferência, e é o caminho automático quando não temos o XML guardado.
+   */
+  async danfse(chave: string, fonte: 'local' | 'adn' = 'local'): Promise<Buffer> {
     const doc = await this.prisma.nfseDocumento.findUnique({ where: { chave_acesso: chave } });
+
+    if (fonte === 'local' && doc?.xml) {
+      const dados = await extrairNacional(doc.xml, doc.situacao === 'CANCELADA');
+      return gerarDanfse(dados);
+    }
+
+    if (fonte === 'local') {
+      this.logger.warn(`DANFSe ${chave.slice(0, 12)}…: sem XML guardado, caindo para o ADN.`);
+    }
     const cnpj = doc?.cnpj_destinatario || process.env.NFSE_ADN_CNPJ;
     return this.adn.baixarDanfse(chave, cnpj || undefined);
   }

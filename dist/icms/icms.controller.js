@@ -23,6 +23,13 @@ let IcmsController = class IcmsController {
     async getInvoices(start, end) {
         return this.service.syncInvoices(start, end);
     }
+    async importXmlInvoices(body) {
+        const xmls = Array.isArray(body === null || body === void 0 ? void 0 : body.xmls) ? body.xmls : [];
+        if (xmls.length === 0) {
+            throw new common_1.BadRequestException('Nenhum XML enviado para importação.');
+        }
+        return this.service.importXmlInvoices(xmls);
+    }
     async getInvoiceByKey(chaveNfe) {
         const invoice = await this.service.getInvoiceByKey(chaveNfe);
         if (!invoice) {
@@ -156,17 +163,31 @@ let IcmsController = class IcmsController {
         if (!payload) {
             throw new common_1.NotFoundException(`Guia não encontrada para a NF: ${chaveNfe}`);
         }
-        const utf8FileName = String(payload.fileName || 'guia.pdf');
+        res.set(this.cabecalhoPdf(payload.fileName));
+        return new common_1.StreamableFile(payload.stream);
+    }
+    async getGuiasEscaneadas(chaveNfe) {
+        const guias = await this.service.getGuiasEscaneadasByNfe(chaveNfe);
+        return { count: guias.length, guias };
+    }
+    async downloadGuiaEscaneada(id, res) {
+        const payload = await this.service.downloadGuiaEscaneada(Number(id));
+        if (!payload) {
+            throw new common_1.NotFoundException(`Guia escaneada n\u00e3o encontrada: ${id}`);
+        }
+        res.set(this.cabecalhoPdf(payload.fileName));
+        return new common_1.StreamableFile(payload.stream);
+    }
+    cabecalhoPdf(fileName) {
+        const utf8FileName = String(fileName || 'guia.pdf');
         const asciiFallback = utf8FileName
             .normalize('NFD')
             .replace(/[\u0300-\u036f]/g, '')
             .replace(/[^a-zA-Z0-9_.-]/g, '_') || 'guia.pdf';
-        const encodedUtf8FileName = encodeURIComponent(utf8FileName);
-        res.set({
+        return {
             'Content-Type': 'application/pdf',
-            'Content-Disposition': `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodedUtf8FileName}`,
-        });
-        return new common_1.StreamableFile(payload.stream);
+            'Content-Disposition': `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(utf8FileName)}`,
+        };
     }
     async removeGuiaByNfe(chaveNfe) {
         const removed = await this.service.removeGuiaByNfe(chaveNfe);
@@ -201,6 +222,13 @@ __decorate([
     __metadata("design:paramtypes", [String, String]),
     __metadata("design:returntype", Promise)
 ], IcmsController.prototype, "getInvoices", null);
+__decorate([
+    (0, common_1.Post)('nfe-distribuicao/import'),
+    __param(0, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object]),
+    __metadata("design:returntype", Promise)
+], IcmsController.prototype, "importXmlInvoices", null);
 __decorate([
     (0, common_1.Get)('nfe-distribuicao/:chaveNfe'),
     __param(0, (0, common_1.Param)('chaveNfe')),
@@ -389,6 +417,21 @@ __decorate([
     __metadata("design:paramtypes", [String, Object]),
     __metadata("design:returntype", Promise)
 ], IcmsController.prototype, "downloadGuiaByNfe", null);
+__decorate([
+    (0, common_1.Get)('guia/:chaveNfe/escaneadas'),
+    __param(0, (0, common_1.Param)('chaveNfe')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", Promise)
+], IcmsController.prototype, "getGuiasEscaneadas", null);
+__decorate([
+    (0, common_1.Get)('guia-escaneada/:id/download'),
+    __param(0, (0, common_1.Param)('id')),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:returntype", Promise)
+], IcmsController.prototype, "downloadGuiaEscaneada", null);
 __decorate([
     (0, common_1.Delete)('guia/:chaveNfe'),
     __param(0, (0, common_1.Param)('chaveNfe')),

@@ -91,10 +91,17 @@ export class NfseController {
     return this.service.detalhe(chave);
   }
 
-  /** PDF (DANFSE) da NFS-e. */
+  /**
+   * DANFSe (PDF) da NFS-e. Por padrão desenhado aqui a partir do XML guardado;
+   * `?fonte=adn` baixa o PDF oficial do portal nacional, para conferência.
+   */
   @Get('documentos/:chave/danfse')
-  async danfse(@Param('chave') chave: string, @Res({ passthrough: true }) res: Response) {
-    const buffer = await this.service.danfse(chave);
+  async danfse(
+    @Param('chave') chave: string,
+    @Res({ passthrough: true }) res: Response,
+    @Query('fonte') fonte?: string,
+  ) {
+    const buffer = await this.service.danfse(chave, fonte === 'adn' ? 'adn' : 'local');
     res.set({
       'Content-Type': 'application/pdf',
       'Content-Disposition': `inline; filename="danfse-${chave}.pdf"`,

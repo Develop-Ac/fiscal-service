@@ -312,6 +312,75 @@ let IcmsService = IcmsService_1 = class IcmsService {
             TIPO_IMPOSTO: local.tipo_imposto,
         };
     }
+    async importXmlInvoices(xmls) {
+        var _a, _b;
+        const parser = new xml2js.Parser({ explicitArray: false });
+        const out = [];
+        for (const raw of Array.isArray(xmls) ? xmls : []) {
+            const xmlStr = await this.decodeXml(raw);
+            if (!xmlStr)
+                continue;
+            let parsed;
+            try {
+                parsed = await parser.parseStringPromise(xmlStr);
+            }
+            catch (e) {
+                this.logger.warn(`XML importado inválido, ignorado: ${e instanceof Error ? e.message : String(e)}`, 'Import');
+                continue;
+            }
+            const nfe = parsed.nfeProc ? parsed.nfeProc.NFe : parsed.NFe;
+            if (!((_b = (_a = nfe === null || nfe === void 0 ? void 0 : nfe.infNFe) === null || _a === void 0 ? void 0 : _a['$']) === null || _b === void 0 ? void 0 : _b.Id))
+                continue;
+            const infNfe = nfe.infNFe;
+            const chave = String(infNfe['$']['Id']).replace('NFe', '').replace(/\D/g, '');
+            if (chave.length !== 44)
+                continue;
+            const emit = infNfe.emit || {};
+            const ide = infNfe.ide || {};
+            const valorTotal = this.extractValorTotalFromXml(xmlStr);
+            const compressedXml = this.encodeXml(xmlStr);
+            const tpNF = parseInt(ide.tpNF || 0);
+            const dataEmissao = new Date(ide.dhEmi || ide.dEmi || Date.now());
+            try {
+                const record = await this.prisma.nfeConciliacao.upsert({
+                    where: { chave_nfe: chave },
+                    create: {
+                        chave_nfe: chave,
+                        emitente: emit.xNome || 'Desconhecido',
+                        cnpj_emitente: emit.CNPJ || emit.CPF || '',
+                        data_emissao: dataEmissao,
+                        valor_total: valorTotal,
+                        xml_completo: compressedXml,
+                        status_erp: 'UPLOAD',
+                        tipo_operacao: tpNF,
+                        tipo_operacao_desc: tpNF === 0 ? 'ENTRADA' : 'SAÍDA',
+                    },
+                    update: {
+                        xml_completo: compressedXml,
+                        updated_at: new Date(),
+                    },
+                });
+                out.push({
+                    CHAVE_NFE: record.chave_nfe,
+                    NOME_EMITENTE: record.emitente,
+                    CPF_CNPJ_EMITENTE: record.cnpj_emitente,
+                    DATA_EMISSAO: record.data_emissao,
+                    DT_ENTRADA: record.dt_entrada,
+                    VALOR_TOTAL: Number(record.valor_total || 0),
+                    STATUS_ERP: record.status_erp,
+                    TIPO_OPERACAO: record.tipo_operacao,
+                    TIPO_OPERACAO_DESC: record.tipo_operacao_desc,
+                    XML_COMPLETO: xmlStr,
+                    XML_TIPO: this.detectXmlType(xmlStr),
+                    TIPO_IMPOSTO: record.tipo_imposto,
+                });
+            }
+            catch (e) {
+                this.logger.error(`Falha ao importar NF ${chave}`, e instanceof Error ? e.stack : String(e), 'Import');
+            }
+        }
+        return out;
+    }
     detectXmlType(xml) {
         const raw = String(xml || '').trim();
         if (!raw)
@@ -1164,6 +1233,8 @@ let IcmsService = IcmsService_1 = class IcmsService {
                 else
                     status = "OK (Padrão 50%)";
             }
+            const valorGuiaComplementar = parseFloat(Math.max(0, diffSt).toFixed(2));
+            const valorPagoAMais = parseFloat(Math.max(0, -diffSt).toFixed(2));
             const aliquotaInternaDecimal = icmsInternoRate / 100.0;
             const aliquotaInterestadualDIFAL = pIcmsOrigem > 0
                 ? pIcmsOrigem / 100.0
@@ -1213,6 +1284,8 @@ let IcmsService = IcmsService_1 = class IcmsService {
                 vlCreditoDifal: parseFloat(vlCreditoDifal.toFixed(2)),
                 aliqInterestadualDifal: aliquotaInterestadualDIFAL * 100,
                 diferenca: diffSt,
+                valorGuiaComplementar,
+                valorPagoAMais,
                 status: status
             });
         }
@@ -3160,6 +3233,94 @@ let IcmsService = IcmsService_1 = class IcmsService {
         await this.prisma.$executeRawUnsafe(`DELETE FROM com_nfe_guia_pdf WHERE chave_nfe = $1`, key);
         return true;
     }
+    dadosDaChaveNfe(chaveNfe) {
+        const chave = String(chaveNfe || '').replace(/\D/g, '');
+        if (chave.length !== 44)
+            return null;
+        return {
+            chave,
+            numero: chave.slice(25, 34).replace(/^0+/, ''),
+            cnpjEmitente: chave.slice(6, 20),
+        };
+    }
+    semTabelaDoScan(error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const ausente = /esc_documento/i.test(msg) && /(does not exist|não existe|nao existe|42P01)/i.test(msg);
+        if (ausente) {
+            this.logger.warn(`esc_documento indisponível — guias escaneadas não listadas (${msg}).`);
+        }
+        return ausente;
+    }
+    async getGuiasEscaneadasByNfe(chaveNfe) {
+        const dados = this.dadosDaChaveNfe(chaveNfe);
+        if (!dados)
+            return [];
+        let rows = [];
+        try {
+            rows = await this.prisma.$queryRawUnsafe(`
+                SELECT
+                    id,
+                    -- DATE vira Date de meia-noite LOCAL; converter no banco evita que o
+                    -- fuso do processo empurre a data um dia para trás.
+                    to_char(data_documento, 'YYYY-MM-DD') AS data_documento,
+                    descricao, minio_bucket, minio_key, nome_arquivo,
+                    tamanho_bytes, nf_numero, chave_nfe, fornecedor_nome, fornecedor_cnpj,
+                    for_codigo, criado_em,
+                    CASE WHEN chave_nfe = $1 THEN 'chave' ELSE 'numero_cnpj' END AS vinculo
+                FROM esc_documento
+                WHERE tipo = $4
+                  AND (chave_nfe = $1 OR (nf_numero = $2 AND fornecedor_cnpj = $3))
+                ORDER BY criado_em DESC
+                `, dados.chave, dados.numero, dados.cnpjEmitente, IcmsService_1.TIPO_GUIA_ESCANEADA);
+        }
+        catch (error) {
+            if (this.semTabelaDoScan(error))
+                return [];
+            throw error;
+        }
+        return rows.map((r) => {
+            var _a, _b, _c, _d, _e, _f, _g, _h;
+            return ({
+                id: Number(r.id),
+                data_documento: String((_a = r.data_documento) !== null && _a !== void 0 ? _a : ''),
+                descricao: (_b = r.descricao) !== null && _b !== void 0 ? _b : null,
+                nome_arquivo: (_c = r.nome_arquivo) !== null && _c !== void 0 ? _c : null,
+                tamanho_bytes: r.tamanho_bytes == null ? null : Number(r.tamanho_bytes),
+                nf_numero: (_d = r.nf_numero) !== null && _d !== void 0 ? _d : null,
+                chave_nfe: (_e = r.chave_nfe) !== null && _e !== void 0 ? _e : null,
+                fornecedor_nome: (_f = r.fornecedor_nome) !== null && _f !== void 0 ? _f : null,
+                fornecedor_cnpj: (_g = r.fornecedor_cnpj) !== null && _g !== void 0 ? _g : null,
+                for_codigo: r.for_codigo == null ? null : Number(r.for_codigo),
+                criado_em: r.criado_em instanceof Date ? r.criado_em.toISOString() : String((_h = r.criado_em) !== null && _h !== void 0 ? _h : ''),
+                vinculo: r.vinculo,
+            });
+        });
+    }
+    async downloadGuiaEscaneada(id) {
+        const idNum = Number(id);
+        if (!Number.isInteger(idNum) || idNum <= 0)
+            return null;
+        let rows = [];
+        try {
+            rows = await this.prisma.$queryRawUnsafe(`
+                SELECT minio_bucket, minio_key, nome_arquivo
+                FROM esc_documento
+                WHERE id = $1 AND tipo = $2
+                `, idNum, IcmsService_1.TIPO_GUIA_ESCANEADA);
+        }
+        catch (error) {
+            if (this.semTabelaDoScan(error))
+                return null;
+            throw error;
+        }
+        const doc = rows[0];
+        if (!(doc === null || doc === void 0 ? void 0 : doc.minio_key))
+            return null;
+        const client = this.getMinioClient();
+        const stream = await client.getObject(doc.minio_bucket || this.minioBucket, doc.minio_key);
+        const fileName = this.normalizeUploadedFileName(doc.nome_arquivo || `guia-escaneada-${idNum}.pdf`);
+        return { stream, fileName };
+    }
     async generateDanfe(xml) {
         return new Promise(async (resolve, reject) => {
             try {
@@ -3226,6 +3387,7 @@ IcmsService.CUF_SIGLA = {
     '31': 'MG', '32': 'ES', '33': 'RJ', '35': 'SP', '41': 'PR', '42': 'SC', '43': 'RS',
     '50': 'MS', '51': 'MT', '52': 'GO', '53': 'DF',
 };
+IcmsService.TIPO_GUIA_ESCANEADA = 'guia-icms-st';
 exports.IcmsService = IcmsService = IcmsService_1 = __decorate([
     (0, common_1.Injectable)(),
     __metadata("design:paramtypes", [openquery_service_1.OpenQueryService,

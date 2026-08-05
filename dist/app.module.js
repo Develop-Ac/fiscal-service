@@ -10,9 +10,11 @@ exports.AppModule = void 0;
 const common_1 = require("@nestjs/common");
 const config_1 = require("@nestjs/config");
 const schedule_1 = require("@nestjs/schedule");
+const nestjs_prometheus_1 = require("@willsoto/nestjs-prometheus");
 const icms_module_1 = require("./icms/icms.module");
 const nfse_module_1 = require("./nfse/nfse.module");
 const cte_module_1 = require("./cte/cte.module");
+const sped_module_1 = require("./sped/sped.module");
 const prisma_module_1 = require("./prisma/prisma.module");
 const openquery_module_1 = require("./shared/database/openquery/openquery.module");
 let AppModule = class AppModule {
@@ -28,6 +30,10 @@ exports.AppModule = AppModule = __decorate([
             icms_module_1.IcmsModule,
             nfse_module_1.NfseModule,
             cte_module_1.CteModule,
+            sped_module_1.SpedModule,
+            nestjs_prometheus_1.PrometheusModule.register({
+                defaultMetrics: { enabled: true },
+            }),
         ],
     })
 ], AppModule);
