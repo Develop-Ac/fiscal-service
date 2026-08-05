@@ -4178,6 +4178,25 @@ export class IcmsService {
                 // Decode XML if it's zipped/base64
                 const decodedXml = await this.decodeXml(xml);
 
+                // A distribuição da SEFAZ entrega primeiro um RESUMO (`resNFe`:
+                // chave, emitente e valor) e só depois, com a manifestação, o XML
+                // completo. Do resumo não sai DANFE — não há itens nem impostos.
+                // Sem esta checagem o gerador estoura com "Cannot read properties
+                // of undefined (reading 'NFe')", que não diz nada a quem lê.
+                //
+                // O teste exige `infNFe` COM `Id="NFe…"`: a tag `infNFe` sozinha
+                // também aparece dentro de um CT-e (nos documentos transportados),
+                // e um cteProc passaria por NF-e.
+                if (!/<([A-Za-z0-9_.-]+:)?infNFe\s[^>]*Id\s*=\s*"NFe/i.test(decodedXml)) {
+                    const eCte = /<([A-Za-z0-9_.-]+:)?infCte[\s>]/i.test(decodedXml);
+                    throw new Error(
+                        eCte
+                            ? 'Este XML é um CT-e, não uma NF-e — o documento auxiliar dele é o DACTE.'
+                            : 'Temos apenas o resumo desta NF-e (resNFe), não o XML completo. ' +
+                            'Manifeste a nota na SEFAZ para baixar o documento e gerar o DANFE.',
+                    );
+                }
+
                 const doc = await gerarPDF(decodedXml, { cancelada: false });
                 const chunks: Buffer[] = [];
                 const stream = new Writable({

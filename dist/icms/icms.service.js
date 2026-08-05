@@ -3325,6 +3325,13 @@ let IcmsService = IcmsService_1 = class IcmsService {
         return new Promise(async (resolve, reject) => {
             try {
                 const decodedXml = await this.decodeXml(xml);
+                if (!/<([A-Za-z0-9_.-]+:)?infNFe\s[^>]*Id\s*=\s*"NFe/i.test(decodedXml)) {
+                    const eCte = /<([A-Za-z0-9_.-]+:)?infCte[\s>]/i.test(decodedXml);
+                    throw new Error(eCte
+                        ? 'Este XML é um CT-e, não uma NF-e — o documento auxiliar dele é o DACTE.'
+                        : 'Temos apenas o resumo desta NF-e (resNFe), não o XML completo. ' +
+                            'Manifeste a nota na SEFAZ para baixar o documento e gerar o DANFE.');
+                }
                 const doc = await (0, node_pdf_nfe_1.gerarPDF)(decodedXml, { cancelada: false });
                 const chunks = [];
                 const stream = new stream_1.Writable({

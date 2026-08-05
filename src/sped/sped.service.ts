@@ -35,13 +35,13 @@ export interface SpedOpcoes {
     danfe: boolean;
     /** DACTE dos CT-e de entrada. */
     dacte: boolean;
-    /** DANFSe das NFS-e da competência do arquivo. */
+    /** DANFSe das NFS-e tomadas no período do arquivo. */
     danfse: boolean;
     /** XML das NF-e de entrada. */
     xmlNfe: boolean;
     /** XML dos CT-e de entrada. */
     xmlCte: boolean;
-    /** XML das NFS-e da competência do arquivo. */
+    /** XML das NFS-e tomadas no período do arquivo. */
     xmlNfse: boolean;
     /** Não consulta o ERP: o que não estiver no Postgres fica sem documento. */
     somentePostgres: boolean;
@@ -96,7 +96,7 @@ export interface SpedJob {
     nomeArquivo: string;
 }
 
-/** NFS-e da competência, vinda da distribuição do ADN (com_nfse_documento). */
+/** NFS-e tomada pela empresa do arquivo, vinda da distribuição do ADN. */
 interface NfseDoSped {
     chave: string;
     numero: string;
@@ -117,9 +117,10 @@ const TTL_MS = 60 * 60 * 1000;
  * pacote que a contabilidade arquiva.
  *
  * O arquivo do SPED cobre NF-e (C100) e CT-e (D100). A NFS-e **não está nele** —
- * é imposto municipal e não entra no SPED Fiscal. Ela entra aqui pela competência
- * declarada no registro 0000, buscada no acervo que a distribuição do ADN já
- * mantém; o arquivo serve só para dizer de que mês estamos falando.
+ * é imposto municipal e não entra no SPED Fiscal. Ela vem do acervo que a
+ * distribuição do ADN já mantém, recortado pelo CNPJ e pelo período declarados no
+ * registro 0000: o arquivo serve para dizer de QUEM e de QUANDO estamos falando
+ * (ver `filtroNfse`).
  *
  * Roda como JOB e não como download síncrono: são centenas de documentos e a
  * busca no ERP passa de um minuto. O .zip é escrito em disco temporário enquanto
@@ -142,7 +143,7 @@ export class SpedService implements OnModuleDestroy {
 
     /**
      * Lê o arquivo e devolve a classificação, sem buscar um único XML. O único
-     * toque no banco é contar as NFS-e da competência — que não vêm do arquivo.
+     * toque no banco é contar as NFS-e do período — que não vêm do arquivo.
      */
     async analisar(conteudo: Buffer): Promise<SpedPrevia> {
         const { empresa, notas, ctes } = lerSped(conteudo);
@@ -207,35 +208,51 @@ export class SpedService implements OnModuleDestroy {
     }
 
     // ------------------------------------------------------------------
-    // NFS-e da competência
+    // NFS-e tomadas no período
     // ------------------------------------------------------------------
 
     /**
-     * Janela da competência do arquivo. A NFS-e é registrada pela competência
-     * (o mês a que o serviço pertence); quando ela não vem preenchida, caímos
-     * para a data de emissão, que é o que sobra.
+     * Recorte das NFS-e que entram no pacote: **serviços tomados pela empresa do
+     * arquivo, emitidos dentro do período do 0000**. É o mesmo recorte da tela de
+     * NFS-e da intranet, de propósito — os dois números têm que bater.
+     *
+     * Três decisões que precisam ficar explícitas:
+     *
+     * 1. `cnpj_tomador`, e NÃO `cnpj_destinatario`. O `cnpj_destinatario` é o CNPJ
+     *    com que o certificado foi cadastrado, e o da C. M. Siqueira está gravado
+     *    com os dígitos verificadores trocados (…0150 em vez de …0105, que é o do
+     *    SPED e o do XML). Casar por ele devolveria zero. O `cnpj_tomador` vem do
+     *    XML, então é o dado de origem.
+     * 2. `data_emissao`, e NÃO `competencia`. São eixos diferentes: em julho/2026
+     *    dão 33 e 32 notas. O fechamento se guia pela emissão, igual à tela.
+     * 3. Só `TOMADOR`. O pacote é de ENTRADAS; as NFS-e que a empresa emitiu são
+     *    saídas e já vivem no ERP.
      */
-    private janela(empresa: EmpresaSped | null) {
-        if (!empresa?.dtInicio || !empresa?.dtFim) return null;
-        const ini = new Date(`${empresa.dtInicio}T00:00:00.000Z`);
-        const fim = new Date(`${empresa.dtFim}T23:59:59.999Z`);
+    private filtroNfse(empresa: EmpresaSped | null) {
+        const cnpj = String(empresa?.cnpj ?? '').replace(/\D/g, '');
+        if (!cnpj || !empresa?.dtInicio || !empresa?.dtFim) return null;
+
+        // Datas montadas SEM sufixo Z, como a listagem de NFS-e faz: a coluna é
+        // timestamp sem fuso e um `Z` aqui deslocaria a janela em 4 horas.
+        const ini = new Date(`${empresa.dtInicio}T00:00:00`);
+        const fim = new Date(`${empresa.dtFim}T23:59:59`);
         if (Number.isNaN(ini.getTime()) || Number.isNaN(fim.getTime())) return null;
+
         return {
-            OR: [
-                { competencia: { gte: ini, lte: fim } },
-                { competencia: null, data_emissao: { gte: ini, lte: fim } },
-            ],
+            papel: 'TOMADOR',
+            cnpj_tomador: cnpj,
+            data_emissao: { gte: ini, lte: fim },
         };
     }
 
     private async contarNfse(empresa: EmpresaSped | null): Promise<number> {
-        const where = this.janela(empresa);
+        const where = this.filtroNfse(empresa);
         if (!where) return 0;
         return this.prisma.nfseDocumento.count({ where });
     }
 
     private async buscarNfse(empresa: EmpresaSped | null): Promise<NfseDoSped[]> {
-        const where = this.janela(empresa);
+        const where = this.filtroNfse(empresa);
         if (!where) return [];
         const rows = await this.prisma.nfseDocumento.findMany({
             where,
@@ -331,23 +348,26 @@ export class SpedService implements OnModuleDestroy {
 
         let listaNfse: NfseDoSped[] = [];
         if (querNfse) {
-            job.etapa = 'Buscando as NFS-e da competência';
+            job.etapa = 'Buscando as NFS-e tomadas no período';
             listaNfse = await this.buscarNfse(empresa);
         }
 
         job.total = listaNotas.length + listaCtes.length + listaNfse.length;
         job.etapa =
             `Arquivo lido: ${notas.length} NF-e e ${ctes.length} CT-e de entrada` +
-            (querNfse ? `, ${listaNfse.length} NFS-e na competência` : '');
+            (querNfse ? `, ${listaNfse.length} NFS-e tomada(s) no período` : '');
 
         // ---- 1. XMLs das NF-e/CT-e (uma passada só, serve ao PDF e à exportação) ----
         const chavesNfe = listaNotas.map((c) => c.nota.chave);
         const chavesCte = listaCtes.map((c) => c.chave);
         const achados = new Map<string, XmlAchado>();
+        const somenteResumo = new Set<string>();
 
         if (chavesNfe.length || chavesCte.length) {
             job.etapa = 'Buscando XMLs no Postgres';
-            for (const [k, v] of await this.xmlService.buscarNoPostgres(chavesNfe, chavesCte)) achados.set(k, v);
+            const doPg = await this.xmlService.buscarNoPostgres(chavesNfe, chavesCte);
+            for (const [k, v] of doPg.achados) achados.set(k, v);
+            for (const k of doPg.somenteResumo) somenteResumo.add(k);
 
             if (!opcoes.somentePostgres) {
                 const faltamNfe = chavesNfe.filter((k) => !achados.has(k));
@@ -360,9 +380,12 @@ export class SpedService implements OnModuleDestroy {
                             job.etapa = `Buscando XMLs no ERP — ${rotulo}`;
                         },
                     });
-                    for (const [k, v] of doErp) achados.set(k, v);
+                    for (const [k, v] of doErp.achados) achados.set(k, v);
+                    for (const k of doErp.somenteResumo) somenteResumo.add(k);
                 }
             }
+            // O que o ERP completou deixa de ser pendência de resumo.
+            for (const k of achados.keys()) somenteResumo.delete(k);
         }
 
         const fontes: Record<string, number> = {};
@@ -387,6 +410,16 @@ export class SpedService implements OnModuleDestroy {
         let xmlsExportados = 0;
 
         const semDocumento = (p: Pendencia) => pendencias.push(p);
+
+        /**
+         * Diferencia "não achamos nada" de "achamos só o resumo". O segundo caso
+         * tem conserto conhecido: manifestar a nota na SEFAZ para baixar o XML
+         * completo — e é isso que a pendência precisa dizer.
+         */
+        const motivoSemXml = (chave: string) =>
+            somenteResumo.has(chave)
+                ? 'Só temos o resumo da distribuição (resNFe), não o XML completo — falta manifestar a nota para baixá-lo'
+                : 'XML não encontrado no Postgres nem no ERP';
 
         job.etapa = 'Gerando documentos';
 
@@ -419,7 +452,7 @@ export class SpedService implements OnModuleDestroy {
                     tipo: 'NF-e',
                     numero: n.numero,
                     emitente: n.emitenteNome,
-                    motivo: 'XML não encontrado no Postgres nem no ERP',
+                    motivo: motivoSemXml(n.chave),
                 });
             } else {
                 const xml = this.xmlService.xmlFinal(achado);
@@ -482,7 +515,7 @@ export class SpedService implements OnModuleDestroy {
                     tipo: 'CT-e',
                     numero: cte.numero,
                     emitente: cte.emitenteNome,
-                    motivo: 'XML não encontrado no Postgres nem no ERP',
+                    motivo: motivoSemXml(cte.chave),
                 });
             } else {
                 const xml = this.xmlService.xmlFinal(achado);

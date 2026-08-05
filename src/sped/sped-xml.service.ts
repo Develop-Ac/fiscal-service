@@ -10,6 +10,16 @@ export interface XmlAchado {
     fonte: string;
 }
 
+export interface BuscaXml {
+    achados: Map<string, XmlAchado>;
+    /**
+     * Chaves em que a fonte tinha algo, mas era só o RESUMO da distribuição —
+     * não dá DANFE nem serve de arquivo fiscal. Serve para a pendência dizer o
+     * motivo certo em vez de um genérico "não encontrado".
+     */
+    somenteResumo: Set<string>;
+}
+
 /**
  * Busca do XML por chave de acesso, para os documentos que estão no SPED.
  *
@@ -32,6 +42,25 @@ export class SpedXmlService {
         private readonly prisma: PrismaService,
         private readonly openQuery: OpenQueryService,
     ) { }
+
+    /**
+     * O documento existe de verdade? A distribuição da SEFAZ entrega primeiro um
+     * **resumo** (`resNFe`: chave, emitente, valor e nada mais) e só depois, com a
+     * manifestação, o XML completo. Esse resumo é gravado na mesma coluna do XML.
+     *
+     * De um resumo não sai DANFE — não há itens, endereço nem impostos — e ele
+     * também não serve de arquivo fiscal. Sem esta checagem o resumo passava por
+     * documento: o gerador estourava com "Cannot read properties of undefined" e
+     * a exportação gravava um `<chave>.xml` que não é nota nenhuma.
+     *
+     * O teste é pela presença do grupo de informações (`infNFe`/`infCte`), com ou
+     * sem prefixo de namespace — é o que distingue documento de resumo.
+     */
+    private static readonly RE_INF = /<([A-Za-z0-9_.-]+:)?(infNFe|infCte)[\s>]/i;
+
+    documentoCompleto(xml: string): boolean {
+        return SpedXmlService.RE_INF.test(xml || '');
+    }
 
     /**
      * XML pode vir em texto puro ou gzip+base64.
@@ -82,8 +111,16 @@ export class SpedXmlService {
     }
 
     /** Postgres da intranet — as duas tabelas de espelho. */
-    async buscarNoPostgres(chavesNfe: string[], chavesCte: string[]): Promise<Map<string, XmlAchado>> {
+    async buscarNoPostgres(chavesNfe: string[], chavesCte: string[]): Promise<BuscaXml> {
         const achados = new Map<string, XmlAchado>();
+        const somenteResumo = new Set<string>();
+
+        const registrar = (chave: string, xml: string, fonte: string) => {
+            // Resumo não encerra a busca: o ERP pode ter o documento de verdade.
+            // Fica anotado para a pendência dizer o motivo certo lá no fim.
+            if (this.documentoCompleto(xml)) achados.set(chave, { xml, protocolo: null, fonte });
+            else if (xml) somenteResumo.add(chave);
+        };
 
         if (chavesNfe.length) {
             const rows = await this.prisma.nfeConciliacao.findMany({
@@ -91,8 +128,7 @@ export class SpedXmlService {
                 select: { chave_nfe: true, xml_completo: true },
             });
             for (const r of rows) {
-                const xml = this.decodificarXml(r.xml_completo);
-                if (xml) achados.set(r.chave_nfe, { xml, protocolo: null, fonte: 'postgres:com_nfe_conciliacao' });
+                registrar(r.chave_nfe, this.decodificarXml(r.xml_completo), 'postgres:com_nfe_conciliacao');
             }
         }
 
@@ -102,12 +138,11 @@ export class SpedXmlService {
                 select: { chave_acesso: true, xml_completo: true },
             });
             for (const r of rows) {
-                const xml = this.decodificarXml(r.xml_completo);
-                if (xml) achados.set(r.chave_acesso, { xml, protocolo: null, fonte: 'postgres:com_cte_documento' });
+                registrar(r.chave_acesso, this.decodificarXml(r.xml_completo), 'postgres:com_cte_documento');
             }
         }
 
-        return achados;
+        return { achados, somenteResumo };
     }
 
     /**
@@ -121,8 +156,9 @@ export class SpedXmlService {
         chavesNfe: string[],
         chavesCte: string[],
         opcoes: { empresa: number; tamanhoLote?: number; onProgresso?: (rotulo: string) => void },
-    ): Promise<Map<string, XmlAchado>> {
+    ): Promise<BuscaXml> {
         const achados = new Map<string, XmlAchado>();
+        const somenteResumo = new Set<string>();
         const lote = Math.max(1, Number(opcoes.tamanhoLote || 40));
         const empresa = Number(opcoes.empresa || 1);
 
@@ -179,14 +215,18 @@ export class SpedXmlService {
                 for (const r of rows) {
                     const chave = String(consulta.chave(r) || '').trim();
                     const xml = consulta.xml(r);
-                    if (chave && xml && !achados.has(chave)) {
+                    if (!chave || achados.has(chave)) continue;
+                    if (this.documentoCompleto(xml)) {
                         achados.set(chave, { xml, protocolo: consulta.protocolo(r), fonte: consulta.fonte });
+                        somenteResumo.delete(chave);
+                    } else if (xml) {
+                        somenteResumo.add(chave);
                     }
                 }
             }
         }
 
-        return achados;
+        return { achados, somenteResumo };
     }
 
     private oq(sqlFirebird: string): string {
