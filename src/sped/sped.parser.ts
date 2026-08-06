@@ -134,8 +134,12 @@ export function lerSped(conteudo: Buffer | string): SpedLido {
             const cfop = String(f[3] || '').replace(/\D/g, '');
             if (cfop) notaAtual.cfops.set(cfop, (notaAtual.cfops.get(cfop) || 0) + num(f[5]));
         } else if (reg === 'C170' && notaAtual) {
-            const cfop = String(f[12] || '').replace(/\D/g, '');
-            if (cfop) itensCfop.set(cfop, (itensCfop.get(cfop) || 0) + num(f[8]));
+            // |C170|NUM_ITEM|COD_ITEM|DESCR|QTD|UNID|VL_ITEM|VL_DESC|IND_MOV|CST_ICMS|CFOP|COD_NAT|…
+            //         2       3        4     5   6     7       8       9       10      11    12
+            // CFOP é o campo 11 e o valor do item é o 7. Ler f[12]/f[8] pega
+            // COD_NAT (vazio) e VL_DESC (zero) — o item sumia da classificação.
+            const cfop = String(f[11] || '').replace(/\D/g, '');
+            if (cfop) itensCfop.set(cfop, (itensCfop.get(cfop) || 0) + num(f[7]));
         } else if (reg === 'D100' && f[5] === '57' && f[2] === '0') {
             const chave = String(f[10] || '').replace(/\D/g, '');
             if (chave.length === 44) {

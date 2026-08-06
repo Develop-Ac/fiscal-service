@@ -79,9 +79,9 @@ export declare class IcmsController {
     }): Promise<any[]>;
     savePaymentStatus(body: any): Promise<any[] | {
         fiscalConference: any;
+        valor: number;
         chave_nfe: string;
         data_pagamento: Date;
-        valor: number;
         observacoes: string;
     }>;
     previewFiscalConference(body: FiscalConferenceRequestDto): Promise<{

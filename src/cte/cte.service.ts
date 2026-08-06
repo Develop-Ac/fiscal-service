@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import * as zlib from 'zlib';
 import { randomUUID } from 'crypto';
 import { OpenQueryService } from '../shared/database/openquery/openquery.service';
+import { ErpApiService } from '../shared/erp-api/erp-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { parseCteXml } from './cte-xml.parser';
 import { gerarDacte } from './dacte/dacte.generator';
@@ -48,6 +49,7 @@ export class CteService {
 
   constructor(
     private readonly openQuery: OpenQueryService,
+    private readonly erpApi: ErpApiService,
     private readonly prisma: PrismaService,
   ) {}
 
@@ -555,6 +557,32 @@ export class CteService {
    * devolve a DT_ENTRADA. ⚠️ Só por IN-list — scan amplo por MODELO_NOTA quebra o OLE DB.
    */
   async fetchNfEntradaDatesByKeys(keys: string[]): Promise<Map<string, Date | null>> {
+    if (!keys.length) return new Map();
+    return this.erpApi.comFallback(
+      () => this.fetchNfEntradaDatesByKeysViaApi(keys),
+      () => this.fetchNfEntradaDatesByKeysViaOpenQuery(keys),
+    );
+  }
+
+  /**
+   * O CT-e lançado vira nota de entrada modelo 57: a confirmação sai da mesma
+   * rota usada para NF-e, que já filtra STATUS = 1 e fatia a lista de chaves.
+   */
+  private async fetchNfEntradaDatesByKeysViaApi(keys: string[]): Promise<Map<string, Date | null>> {
+    const result = new Map<string, Date | null>();
+    for (let i = 0; i < keys.length; i += ErpApiService.LOTE_CHAVES) {
+      const lote = keys.slice(i, i + ErpApiService.LOTE_CHAVES);
+      for (const row of await this.erpApi.nfEntradaPorChaves(lote)) {
+        const chave = String(row.CHAVE_NFE || '').trim();
+        if (!chave) continue;
+        const dt = row.DT_ENTRADA ? new Date(row.DT_ENTRADA) : null;
+        result.set(chave, dt && !Number.isNaN(dt.getTime()) ? dt : null);
+      }
+    }
+    return result;
+  }
+
+  private async fetchNfEntradaDatesByKeysViaOpenQuery(keys: string[]): Promise<Map<string, Date | null>> {
     const result = new Map<string, Date | null>();
     if (!keys.length) return result;
     const inList = keys.map((k) => `'${String(k).replace(/'/g, "''")}'`).join(',');

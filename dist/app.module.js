@@ -17,6 +17,7 @@ const cte_module_1 = require("./cte/cte.module");
 const sped_module_1 = require("./sped/sped.module");
 const prisma_module_1 = require("./prisma/prisma.module");
 const openquery_module_1 = require("./shared/database/openquery/openquery.module");
+const erp_api_module_1 = require("./shared/erp-api/erp-api.module");
 let AppModule = class AppModule {
 };
 exports.AppModule = AppModule;
@@ -27,6 +28,7 @@ exports.AppModule = AppModule = __decorate([
             schedule_1.ScheduleModule.forRoot(),
             prisma_module_1.PrismaModule,
             openquery_module_1.OpenQueryModule,
+            erp_api_module_1.ErpApiModule,
             icms_module_1.IcmsModule,
             nfse_module_1.NfseModule,
             cte_module_1.CteModule,

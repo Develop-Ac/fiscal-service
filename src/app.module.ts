@@ -9,6 +9,7 @@ import { CteModule } from './cte/cte.module';
 import { SpedModule } from './sped/sped.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { OpenQueryModule } from './shared/database/openquery/openquery.module';
+import { ErpApiModule } from './shared/erp-api/erp-api.module';
 
 @Module({
     imports: [
@@ -16,6 +17,7 @@ import { OpenQueryModule } from './shared/database/openquery/openquery.module';
         ScheduleModule.forRoot(),
         PrismaModule,
         OpenQueryModule,
+        ErpApiModule,
         IcmsModule,
         NfseModule,
         CteModule,

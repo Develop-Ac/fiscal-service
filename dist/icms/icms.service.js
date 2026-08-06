@@ -49,6 +49,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.IcmsService = void 0;
 const common_1 = require("@nestjs/common");
 const openquery_service_1 = require("../shared/database/openquery/openquery.service");
+const erp_api_service_1 = require("../shared/erp-api/erp-api.service");
 const prisma_service_1 = require("../prisma/prisma.service");
 const simples_nacional_service_1 = require("./simples-nacional.service");
 const xml2js = __importStar(require("xml2js"));
@@ -62,8 +63,9 @@ const archiver_1 = __importDefault(require("archiver"));
 const stream_1 = require("stream");
 const Minio = __importStar(require("minio"));
 let IcmsService = IcmsService_1 = class IcmsService {
-    constructor(openQuery, prisma, simplesNacional) {
+    constructor(openQuery, erpApi, prisma, simplesNacional) {
         this.openQuery = openQuery;
+        this.erpApi = erpApi;
         this.prisma = prisma;
         this.simplesNacional = simplesNacional;
         this.logger = new common_1.Logger(IcmsService_1.name);
@@ -657,6 +659,40 @@ let IcmsService = IcmsService_1 = class IcmsService {
         }
     }
     async fetchErpInvoices(start, end) {
+        return this.erpApi.comFallback(() => this.fetchErpInvoicesViaApi(start, end), () => this.fetchErpInvoicesViaOpenQuery(start, end));
+    }
+    async fetchErpInvoicesViaApi(start, end) {
+        const { startDate, endDate } = this.getDateRangeOrDefault(start, end);
+        const iso = (d) => d.toISOString().slice(0, 10);
+        const pendentes = await this.erpApi.nfeDistribuicaoPendentes(iso(startDate), iso(endDate));
+        if (!pendentes.length)
+            return [];
+        const comXml = pendentes
+            .filter((linha) => Number(linha.TEM_XML) === 1)
+            .map((linha) => String(linha.CHAVE_NFE || '').trim())
+            .filter(Boolean);
+        const xmlPorChave = new Map();
+        for (let i = 0; i < comXml.length; i += erp_api_service_1.ErpApiService.LOTE_CHAVES) {
+            const lote = comXml.slice(i, i + erp_api_service_1.ErpApiService.LOTE_CHAVES);
+            for (const linha of await this.erpApi.xmlPorChaves(lote)) {
+                xmlPorChave.set(String(linha.CHAVE_NFE || '').trim(), {
+                    XML_RESUMO: linha.XML_RESUMO,
+                    XML_COMPLETO: linha.XML_COMPLETO,
+                });
+            }
+        }
+        return pendentes.map((linha) => {
+            var _a, _b;
+            const chave = String(linha.CHAVE_NFE || '').trim();
+            const xml = xmlPorChave.get(chave);
+            return Object.assign(Object.assign({}, linha), { CHAVE_NFE: chave, EMPRESA: 1, TIPO_OPERACAO_DESC: Number(linha.TIPO_OPERACAO) === 0
+                    ? 'ENTRADA PRÓPRIA'
+                    : Number(linha.TIPO_OPERACAO) === 1
+                        ? 'SAÍDA'
+                        : 'OUTROS', XML_RESUMO: (_a = xml === null || xml === void 0 ? void 0 : xml.XML_RESUMO) !== null && _a !== void 0 ? _a : null, XML_COMPLETO: (_b = xml === null || xml === void 0 ? void 0 : xml.XML_COMPLETO) !== null && _b !== void 0 ? _b : null });
+        });
+    }
+    async fetchErpInvoicesViaOpenQuery(start, end) {
         const startFilter = this.toFirebirdDateOrNull(start);
         const endFilter = this.toFirebirdDateOrNull(end);
         const dateClause = startFilter && endFilter
@@ -699,43 +735,42 @@ let IcmsService = IcmsService_1 = class IcmsService {
             return [];
         }
     }
-    async fetchEntradaXmlInvoices() {
-        const sql = `
-      SELECT
-          X.EMPRESA,
-          X.CHAVE_NFE,
-          X.XML_RESUMO,
-          X.XML_COMPLETO
-      FROM NF_ENTRADA_XML X
-      WHERE X.EMPRESA = 1
-      ORDER BY X.CHAVE_NFE DESC
-    `;
-        const firebirdSql = sql.replace(/'/g, "''");
-        const tsql = `SELECT * FROM OPENQUERY(CONSULTA, '${firebirdSql}')`;
-        try {
-            return await this.openQuery.query(tsql, {});
-        }
-        catch (e) {
-            this.logger.error('Error fetching NF_ENTRADA_XML invoices', e);
-            return [];
-        }
-    }
     async fetchEntradaXmlKeys() {
         const sql = `
       SELECT
           X.CHAVE_NFE
       FROM NF_ENTRADA_XML X
       WHERE X.EMPRESA = 1
-      ORDER BY X.CHAVE_NFE DESC
+      ORDER BY X.CHAVE_NFE
     `;
         const firebirdSql = sql.replace(/'/g, "''");
         const tsql = `SELECT * FROM OPENQUERY(CONSULTA, '${firebirdSql}')`;
         const rows = await this.openQuery.query(tsql, {}, { timeout: 300000, allowZeroRows: true });
         return rows
             .map(r => String(r.CHAVE_NFE || '').trim())
-            .filter(Boolean);
+            .filter(Boolean)
+            .reverse();
     }
     async fetchNfEntradaDatesByKeys(keys) {
+        if (!keys.length)
+            return new Map();
+        return this.erpApi.comFallback(() => this.fetchNfEntradaDatesByKeysViaApi(keys), () => this.fetchNfEntradaDatesByKeysViaOpenQuery(keys));
+    }
+    async fetchNfEntradaDatesByKeysViaApi(keys) {
+        const result = new Map();
+        for (let i = 0; i < keys.length; i += erp_api_service_1.ErpApiService.LOTE_CHAVES) {
+            const lote = keys.slice(i, i + erp_api_service_1.ErpApiService.LOTE_CHAVES);
+            for (const row of await this.erpApi.nfEntradaPorChaves(lote)) {
+                const chave = String(row.CHAVE_NFE || '').trim();
+                if (!chave)
+                    continue;
+                const dt = row.DT_ENTRADA ? new Date(row.DT_ENTRADA) : null;
+                result.set(chave, dt && !Number.isNaN(dt.getTime()) ? dt : null);
+            }
+        }
+        return result;
+    }
+    async fetchNfEntradaDatesByKeysViaOpenQuery(keys) {
         const result = new Map();
         if (!keys.length)
             return result;
@@ -770,6 +805,19 @@ let IcmsService = IcmsService_1 = class IcmsService {
     async fetchEntradaXmlInvoicesByKeys(keys) {
         if (!keys.length)
             return [];
+        return this.erpApi.comFallback(() => this.fetchEntradaXmlInvoicesByKeysViaApi(keys), () => this.fetchEntradaXmlInvoicesByKeysViaOpenQuery(keys));
+    }
+    async fetchEntradaXmlInvoicesByKeysViaApi(keys) {
+        const linhas = [];
+        for (let i = 0; i < keys.length; i += erp_api_service_1.ErpApiService.LOTE_CHAVES) {
+            const lote = keys.slice(i, i + erp_api_service_1.ErpApiService.LOTE_CHAVES);
+            linhas.push(...(await this.erpApi.xmlPorChaves(lote)).map((l) => (Object.assign(Object.assign({}, l), { EMPRESA: 1 }))));
+        }
+        return linhas;
+    }
+    async fetchEntradaXmlInvoicesByKeysViaOpenQuery(keys) {
+        if (!keys.length)
+            return [];
         const inList = keys
             .map((k) => `'${String(k).replace(/'/g, "''")}'`)
             .join(',');
@@ -782,11 +830,12 @@ let IcmsService = IcmsService_1 = class IcmsService {
       FROM NF_ENTRADA_XML X
       WHERE X.EMPRESA = 1
         AND X.CHAVE_NFE IN (${inList})
-      ORDER BY X.CHAVE_NFE DESC
+      ORDER BY X.CHAVE_NFE
     `;
         const firebirdSql = sql.replace(/'/g, "''");
         const tsql = `SELECT * FROM OPENQUERY(CONSULTA, '${firebirdSql}')`;
-        return await this.openQuery.query(tsql, {}, { timeout: 300000, allowZeroRows: true });
+        const rows = await this.openQuery.query(tsql, {}, { timeout: 300000, allowZeroRows: true });
+        return rows.reverse();
     }
     async decodeXml(content) {
         if (!content)
@@ -1696,10 +1745,13 @@ let IcmsService = IcmsService_1 = class IcmsService {
         return (_a = rows[0]) !== null && _a !== void 0 ? _a : null;
     }
     async findInternalProductErp(proCodigo) {
-        var _a;
         const code = this.digitsOnly(proCodigo);
         if (!code)
             return null;
+        return this.erpApi.comFallback(() => this.erpApi.produtoFiscalUnico(Number(code)), () => this.findInternalProductErpViaOpenQuery(code));
+    }
+    async findInternalProductErpViaOpenQuery(code) {
+        var _a;
         const firebirdSql = `
       SELECT FIRST 1
           PRO_CODIGO, PRO_DESCRICAO, ST_CODIGO, SUBTIPO,
@@ -2193,6 +2245,17 @@ let IcmsService = IcmsService_1 = class IcmsService {
         };
     }
     async fetchLancamentoErp(chaveNfe) {
+        return this.erpApi.comFallback(() => this.fetchLancamentoErpViaApi(chaveNfe), () => this.fetchLancamentoErpViaOpenQuery(chaveNfe));
+    }
+    async fetchLancamentoErpViaApi(chaveNfe) {
+        const notas = await this.erpApi.nfEntradaPorChaves([chaveNfe]);
+        if (!notas.length)
+            return null;
+        const header = notas.reduce((maior, atual) => Number(atual.NFE) > Number(maior.NFE) ? atual : maior);
+        const itens = await this.erpApi.nfeItens(Number(header.NFE));
+        return { header, itens };
+    }
+    async fetchLancamentoErpViaOpenQuery(chaveNfe) {
         const safeChave = String(chaveNfe).replace(/'/g, "''");
         const headSql = `
       SELECT FIRST 1 NFE, NOTA_FISCAL, SERIE, MODELO_NOTA, FOR_CODIGO, CHAVE_NFE,
@@ -2215,6 +2278,9 @@ let IcmsService = IcmsService_1 = class IcmsService {
         return { header, itens };
     }
     async existsInNfeDistribuicao(chaveNfe) {
+        return this.erpApi.comFallback(() => this.erpApi.nfeDistribuicaoTemChave(chaveNfe), () => this.existsInNfeDistribuicaoViaOpenQuery(chaveNfe));
+    }
+    async existsInNfeDistribuicaoViaOpenQuery(chaveNfe) {
         const safe = String(chaveNfe).replace(/'/g, "''");
         const fb = `SELECT FIRST 1 CHAVE_NFE FROM NFE_DISTRIBUICAO WHERE EMPRESA = 1 AND IMPORTADA = 'N' AND CHAVE_NFE = '${safe}'`;
         try {
@@ -3398,6 +3464,7 @@ IcmsService.TIPO_GUIA_ESCANEADA = 'guia-icms-st';
 exports.IcmsService = IcmsService = IcmsService_1 = __decorate([
     (0, common_1.Injectable)(),
     __metadata("design:paramtypes", [openquery_service_1.OpenQueryService,
+        erp_api_service_1.ErpApiService,
         prisma_service_1.PrismaService,
         simples_nacional_service_1.SimplesNacionalService])
 ], IcmsService);

@@ -1,9 +1,11 @@
 import { OpenQueryService } from '../shared/database/openquery/openquery.service';
+import { ErpApiService } from '../shared/erp-api/erp-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SimplesNacionalService } from './simples-nacional.service';
 import { FiscalConferenceRequestDto, FiscalConferenceItemDto } from './dto/fiscal-conference.dto';
 export declare class IcmsService {
     private readonly openQuery;
+    private readonly erpApi;
     private readonly prisma;
     private readonly simplesNacional;
     private readonly logger;
@@ -14,7 +16,7 @@ export declare class IcmsService {
     private readonly monofasicoNcmSet;
     private readonly launchedSyncJobs;
     private readonly xmlNormalizationJobs;
-    constructor(openQuery: OpenQueryService, prisma: PrismaService, simplesNacional: SimplesNacionalService);
+    constructor(openQuery: OpenQueryService, erpApi: ErpApiService, prisma: PrismaService, simplesNacional: SimplesNacionalService);
     private parseReferenceData;
     syncInvoices(start?: string, end?: string): Promise<{
         CHAVE_NFE: string;
@@ -94,10 +96,15 @@ export declare class IcmsService {
     private appendJobLog;
     private runLaunchedInvoicesSync;
     fetchErpInvoices(start?: string, end?: string): Promise<any[]>;
-    fetchEntradaXmlInvoices(): Promise<any[]>;
+    private fetchErpInvoicesViaApi;
+    private fetchErpInvoicesViaOpenQuery;
     fetchEntradaXmlKeys(): Promise<string[]>;
     fetchNfEntradaDatesByKeys(keys: string[]): Promise<Map<string, Date | null>>;
+    private fetchNfEntradaDatesByKeysViaApi;
+    private fetchNfEntradaDatesByKeysViaOpenQuery;
     fetchEntradaXmlInvoicesByKeys(keys: string[]): Promise<any[]>;
+    private fetchEntradaXmlInvoicesByKeysViaApi;
+    private fetchEntradaXmlInvoicesByKeysViaOpenQuery;
     private decodeXml;
     private encodeXml;
     private normalizeBlobXml;
@@ -134,6 +141,7 @@ export declare class IcmsService {
     private findInternalProduct;
     private findInternalProductStage;
     private findInternalProductErp;
+    private findInternalProductErpViaOpenQuery;
     private isMonofasicoNcm;
     private cleanDigits;
     private normalizeComparisonText;
@@ -178,7 +186,10 @@ export declare class IcmsService {
     }>;
     private parseNotaParaAuditoria;
     private fetchLancamentoErp;
+    private fetchLancamentoErpViaApi;
+    private fetchLancamentoErpViaOpenQuery;
     private existsInNfeDistribuicao;
+    private existsInNfeDistribuicaoViaOpenQuery;
     private reconciliarStatusEntrada;
     private computarAuditoria;
     private errosFromComputado;
@@ -509,9 +520,9 @@ export declare class IcmsService {
         itens?: FiscalConferenceItemDto[];
     }): Promise<{
         fiscalConference: any;
+        valor: number;
         chave_nfe: string;
         data_pagamento: Date;
-        valor: number;
         observacoes: string;
     }>;
     getPaymentStatusMap(): Promise<Record<string, {

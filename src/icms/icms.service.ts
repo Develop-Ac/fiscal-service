@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { OpenQueryService } from '../shared/database/openquery/openquery.service';
+import { ErpApiService } from '../shared/erp-api/erp-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SimplesNacionalService } from './simples-nacional.service';
 import * as xml2js from 'xml2js';
@@ -64,6 +65,7 @@ export class IcmsService {
 
     constructor(
         private readonly openQuery: OpenQueryService,
+        private readonly erpApi: ErpApiService,
         private readonly prisma: PrismaService,
         private readonly simplesNacional: SimplesNacionalService,
     ) {
@@ -788,6 +790,67 @@ export class IcmsService {
 
     /* Renamed original fetchInvoices to fetchErpInvoices */
     async fetchErpInvoices(start?: string, end?: string) {
+        return this.erpApi.comFallback(
+            () => this.fetchErpInvoicesViaApi(start, end),
+            () => this.fetchErpInvoicesViaOpenQuery(start, end),
+        );
+    }
+
+    /**
+     * Pendentes pela erp-firebird-api: a lista vem sem o XML e o conteúdo é
+     * buscado depois, só para as notas que já têm XML no ERP.
+     *
+     * A consulta precisa de período fechado. O caminho por OPENQUERY, sem
+     * data informada, varre tudo desde 01/2025 — é justamente o tipo de
+     * varredura sem recorte que segura a conexão do ERP.
+     */
+    private async fetchErpInvoicesViaApi(start?: string, end?: string) {
+        const { startDate, endDate } = this.getDateRangeOrDefault(start, end);
+        const iso = (d: Date) => d.toISOString().slice(0, 10);
+
+        const pendentes = await this.erpApi.nfeDistribuicaoPendentes(iso(startDate), iso(endDate));
+        if (!pendentes.length) return [];
+
+        // Só busca XML de quem já tem: no fluxo do ERP a nota chega antes do
+        // XML, e pedir o BLOB de uma chave sem XML custa a ida sem trazer nada.
+        const comXml = pendentes
+            .filter((linha) => Number(linha.TEM_XML) === 1)
+            .map((linha) => String(linha.CHAVE_NFE || '').trim())
+            .filter(Boolean);
+
+        const xmlPorChave = new Map<string, { XML_RESUMO: any; XML_COMPLETO: any }>();
+        for (let i = 0; i < comXml.length; i += ErpApiService.LOTE_CHAVES) {
+            const lote = comXml.slice(i, i + ErpApiService.LOTE_CHAVES);
+            for (const linha of await this.erpApi.xmlPorChaves(lote)) {
+                xmlPorChave.set(String(linha.CHAVE_NFE || '').trim(), {
+                    XML_RESUMO: linha.XML_RESUMO,
+                    XML_COMPLETO: linha.XML_COMPLETO,
+                });
+            }
+        }
+
+        return pendentes.map((linha) => {
+            const chave = String(linha.CHAVE_NFE || '').trim();
+            const xml = xmlPorChave.get(chave);
+            return {
+                ...linha,
+                CHAVE_NFE: chave,
+                EMPRESA: 1,
+                // O catálogo devolve o rótulo sem acento; o restante do serviço
+                // grava e exibe a forma acentuada.
+                TIPO_OPERACAO_DESC:
+                    Number(linha.TIPO_OPERACAO) === 0
+                        ? 'ENTRADA PRÓPRIA'
+                        : Number(linha.TIPO_OPERACAO) === 1
+                            ? 'SAÍDA'
+                            : 'OUTROS',
+                XML_RESUMO: xml?.XML_RESUMO ?? null,
+                XML_COMPLETO: xml?.XML_COMPLETO ?? null,
+            };
+        });
+    }
+
+    private async fetchErpInvoicesViaOpenQuery(start?: string, end?: string) {
         // ... (Original OpenQuery Logic) ...
         const startFilter = this.toFirebirdDateOrNull(start);
         const endFilter = this.toFirebirdDateOrNull(end);
@@ -836,36 +899,18 @@ export class IcmsService {
         }
     }
 
-    async fetchEntradaXmlInvoices() {
-        const sql = `
-      SELECT
-          X.EMPRESA,
-          X.CHAVE_NFE,
-          X.XML_RESUMO,
-          X.XML_COMPLETO
-      FROM NF_ENTRADA_XML X
-      WHERE X.EMPRESA = 1
-      ORDER BY X.CHAVE_NFE DESC
-    `;
-
-        const firebirdSql = sql.replace(/'/g, "''");
-        const tsql = `SELECT * FROM OPENQUERY(CONSULTA, '${firebirdSql}')`;
-
-        try {
-            return await this.openQuery.query<any>(tsql, {});
-        } catch (e) {
-            this.logger.error('Error fetching NF_ENTRADA_XML invoices', e);
-            return [];
-        }
-    }
-
     async fetchEntradaXmlKeys() {
+        // Ordena ASC no banco e inverte aqui. O índice (EMPRESA, CHAVE_NFE) é
+        // ascendente — como quase todos os do ERP — e o Firebird não o percorre
+        // ao contrário: com DESC ele ordena o conjunto inteiro antes de devolver.
+        // A consulta traz TODAS as chaves, então inverter no consumidor devolve
+        // exatamente a mesma lista (não há FIRST/limite decidindo quais linhas voltam).
         const sql = `
       SELECT
           X.CHAVE_NFE
       FROM NF_ENTRADA_XML X
       WHERE X.EMPRESA = 1
-      ORDER BY X.CHAVE_NFE DESC
+      ORDER BY X.CHAVE_NFE
     `;
 
         const firebirdSql = sql.replace(/'/g, "''");
@@ -874,7 +919,8 @@ export class IcmsService {
         const rows = await this.openQuery.query<any>(tsql, {}, { timeout: 300000, allowZeroRows: true });
         return rows
             .map(r => String(r.CHAVE_NFE || '').trim())
-            .filter(Boolean);
+            .filter(Boolean)
+            .reverse();
     }
 
     /**
@@ -884,6 +930,30 @@ export class IcmsService {
      * significam que a nota não está na NF_ENTRADA (ou seja, foi excluída).
      */
     async fetchNfEntradaDatesByKeys(keys: string[]): Promise<Map<string, Date | null>> {
+        if (!keys.length) return new Map();
+        return this.erpApi.comFallback(
+            () => this.fetchNfEntradaDatesByKeysViaApi(keys),
+            () => this.fetchNfEntradaDatesByKeysViaOpenQuery(keys),
+        );
+    }
+
+    private async fetchNfEntradaDatesByKeysViaApi(keys: string[]): Promise<Map<string, Date | null>> {
+        const result = new Map<string, Date | null>();
+        // O lote é menor que o do OPENQUERY: a rota limita a lista de chaves,
+        // e o filtro de STATUS = 1 (lançada) já vem aplicado do outro lado.
+        for (let i = 0; i < keys.length; i += ErpApiService.LOTE_CHAVES) {
+            const lote = keys.slice(i, i + ErpApiService.LOTE_CHAVES);
+            for (const row of await this.erpApi.nfEntradaPorChaves(lote)) {
+                const chave = String(row.CHAVE_NFE || '').trim();
+                if (!chave) continue;
+                const dt = row.DT_ENTRADA ? new Date(row.DT_ENTRADA) : null;
+                result.set(chave, dt && !Number.isNaN(dt.getTime()) ? dt : null);
+            }
+        }
+        return result;
+    }
+
+    private async fetchNfEntradaDatesByKeysViaOpenQuery(keys: string[]): Promise<Map<string, Date | null>> {
         const result = new Map<string, Date | null>();
         if (!keys.length) return result;
 
@@ -923,6 +993,25 @@ export class IcmsService {
 
     async fetchEntradaXmlInvoicesByKeys(keys: string[]) {
         if (!keys.length) return [];
+        return this.erpApi.comFallback(
+            () => this.fetchEntradaXmlInvoicesByKeysViaApi(keys),
+            () => this.fetchEntradaXmlInvoicesByKeysViaOpenQuery(keys),
+        );
+    }
+
+    private async fetchEntradaXmlInvoicesByKeysViaApi(keys: string[]) {
+        const linhas: any[] = [];
+        // O XML é BLOB e a rota limita o lote de propósito: o custo é por nota,
+        // não pela consulta.
+        for (let i = 0; i < keys.length; i += ErpApiService.LOTE_CHAVES) {
+            const lote = keys.slice(i, i + ErpApiService.LOTE_CHAVES);
+            linhas.push(...(await this.erpApi.xmlPorChaves(lote)).map((l) => ({ ...l, EMPRESA: 1 })));
+        }
+        return linhas;
+    }
+
+    private async fetchEntradaXmlInvoicesByKeysViaOpenQuery(keys: string[]) {
+        if (!keys.length) return [];
 
         const inList = keys
             .map((k) => `'${String(k).replace(/'/g, "''")}'`)
@@ -937,13 +1026,14 @@ export class IcmsService {
       FROM NF_ENTRADA_XML X
       WHERE X.EMPRESA = 1
         AND X.CHAVE_NFE IN (${inList})
-      ORDER BY X.CHAVE_NFE DESC
+      ORDER BY X.CHAVE_NFE
     `;
 
         const firebirdSql = sql.replace(/'/g, "''");
         const tsql = `SELECT * FROM OPENQUERY(CONSULTA, '${firebirdSql}')`;
 
-        return await this.openQuery.query<any>(tsql, {}, { timeout: 300000, allowZeroRows: true });
+        const rows = await this.openQuery.query<any>(tsql, {}, { timeout: 300000, allowZeroRows: true });
+        return rows.reverse();
     }
 
     // --- XML UTILS ---
@@ -2084,10 +2174,24 @@ export class IcmsService {
         return rows[0] ?? null;
     }
 
-    /** Fallback do cadastro do produto direto na PRODUTOS (empresa 1) do ERP. */
+    /**
+     * Fallback do cadastro do produto direto na PRODUTOS (empresa 1) do ERP.
+     *
+     * A conferência pergunta item a item. Pela API, as chamadas unitárias que
+     * chegam juntas são agrupadas num único SELECT com IN do outro lado —
+     * continua sendo uma requisição por item, mas deixa de ser uma ida ao
+     * Firebird por item, que é o que esgota o pool.
+     */
     private async findInternalProductErp(proCodigo: string) {
         const code = this.digitsOnly(proCodigo);
         if (!code) return null;
+        return this.erpApi.comFallback(
+            () => this.erpApi.produtoFiscalUnico(Number(code)),
+            () => this.findInternalProductErpViaOpenQuery(code),
+        );
+    }
+
+    private async findInternalProductErpViaOpenQuery(code: string) {
         const firebirdSql = `
       SELECT FIRST 1
           PRO_CODIGO, PRO_DESCRICAO, ST_CODIGO, SUBTIPO,
@@ -2722,6 +2826,31 @@ export class IcmsService {
         header: any;
         itens: any[];
     } | null> {
+        return this.erpApi.comFallback(
+            () => this.fetchLancamentoErpViaApi(chaveNfe),
+            () => this.fetchLancamentoErpViaOpenQuery(chaveNfe),
+        );
+    }
+
+    private async fetchLancamentoErpViaApi(chaveNfe: string) {
+        const notas = await this.erpApi.nfEntradaPorChaves([chaveNfe]);
+        if (!notas.length) return null;
+
+        // Num relançamento a mesma chave tem mais de uma linha; a rota já
+        // devolve só as concluídas (STATUS = 1) e a mais recente é a de maior
+        // NFE — o mesmo critério do ORDER BY NFE DESC do caminho antigo.
+        const header = notas.reduce((maior, atual) =>
+            Number(atual.NFE) > Number(maior.NFE) ? atual : maior,
+        );
+
+        const itens = await this.erpApi.nfeItens(Number(header.NFE));
+        return { header, itens };
+    }
+
+    private async fetchLancamentoErpViaOpenQuery(chaveNfe: string): Promise<{
+        header: any;
+        itens: any[];
+    } | null> {
         const safeChave = String(chaveNfe).replace(/'/g, "''");
         // STATUS=1 = Concluída (lançamento ativo); STATUS=2 = Cancelada. Num
         // relançamento há 2 linhas (1 e 2) — pegamos a concluída mais recente.
@@ -2756,6 +2885,13 @@ export class IcmsService {
 
     /** Verifica se a chave voltou para a temporária NFE_DISTRIBUICAO (pendente). */
     private async existsInNfeDistribuicao(chaveNfe: string): Promise<boolean> {
+        return this.erpApi.comFallback(
+            () => this.erpApi.nfeDistribuicaoTemChave(chaveNfe),
+            () => this.existsInNfeDistribuicaoViaOpenQuery(chaveNfe),
+        );
+    }
+
+    private async existsInNfeDistribuicaoViaOpenQuery(chaveNfe: string): Promise<boolean> {
         const safe = String(chaveNfe).replace(/'/g, "''");
         const fb = `SELECT FIRST 1 CHAVE_NFE FROM NFE_DISTRIBUICAO WHERE EMPRESA = 1 AND IMPORTADA = 'N' AND CHAVE_NFE = '${safe}'`;
         try {

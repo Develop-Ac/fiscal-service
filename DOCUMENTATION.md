@@ -473,3 +473,88 @@ Endpoints + UI:
 * `PUT /icms/fiscal-regras` — substitui tudo (full replace atômico) e invalida o cache.
 * Botão **Regras fiscais** no topo da aba abre o modal `RegrasFiscaisModal.tsx`
   (3 seções editáveis: matriz, OPF→destinação, origem CST).
+
+## Leitura do ERP pela erp-firebird-api (agosto/2026)
+
+Até aqui, **toda** consulta ao Celta saía deste serviço por
+`OPENQUERY(CONSULTA, ...)`: o SQL Server abre uma sessão no Firebird e devolve o
+resultado. Quando essa sessão trava — ou quando o linked server engasga — o
+fiscal-service para junto, com o ERP saudável do outro lado.
+
+O fiscal-service é o **primeiro serviço a consumir a
+[erp-firebird-api](../erp-firebird-api/README.md)**, que lê o Firebird direto.
+
+### O que muda além do caminho
+
+A API monta o `SELECT` a partir do catálogo dela: nome de coluna é validado
+contra os metadados e valor viaja como parâmetro. Duas defesas que este serviço
+não tinha:
+
+* **`EMPRESA` obrigatória** nas tabelas que têm a coluna. O mesmo cadastro
+  existe nas empresas 1 e 3; sem o filtro vêm as duas e "a primeira linha" é
+  arbitrária. Medido: `PRODUTOS` sem `EMPRESA` = 119ms e 3 linhas; com = 12ms e
+  1 linha.
+* **Agrupamento de consulta unitária.** A conferência fiscal pergunta produto a
+  produto. Medido contra o ERP real: **10 consultas simultâneas viraram 1 ida ao
+  Firebird**, e cada chamador recebeu o seu produto (10/10).
+
+### Variáveis de ambiente
+
+```bash
+# Endereço da erp-firebird-api. VAZIO = tudo continua indo por OPENQUERY.
+ERP_API_URL=http://intranet_erp-firebird-api:8010
+# Mesmo token dos outros serviços (header x-app-token).
+ERP_API_TOKEN=
+# Opcional. Default 30000.
+ERP_API_TIMEOUT_MS=30000
+```
+
+Ligar e desligar é só a variável: sem ela o serviço se comporta exatamente como
+antes. Toda chamada tem o caminho antigo como alternativa — se a API não
+responder, a leitura vai por OPENQUERY e o log diz que caiu. Depois de 3 falhas
+seguidas o cliente para de tentar por 60s, para não pagar o timeout inteiro em
+cada consulta enquanto a API está fora.
+
+### O que passou a usar a API
+
+| Método (`src/`) | Rota |
+|---|---|
+| `icms.service.ts` · `fetchErpInvoices` | `/erp/nfe-distribuicao/pendentes` + `/erp/nf-entrada-xml/por-chaves` |
+| `icms.service.ts` · `fetchNfEntradaDatesByKeys` | `/erp/nf-entrada/por-chaves` |
+| `icms.service.ts` · `fetchEntradaXmlInvoicesByKeys` | `/erp/nf-entrada-xml/por-chaves` |
+| `icms.service.ts` · `fetchLancamentoErp` | `/erp/nf-entrada/por-chaves` + `/erp/nfe-itens` |
+| `icms.service.ts` · `existsInNfeDistribuicao` | `/erp/nfe-distribuicao` |
+| `icms.service.ts` · `findInternalProductErp` | `/erp/produtos` (`PRO_CODIGO:igual`) |
+| `cte.service.ts` · `fetchNfEntradaDatesByKeys` | `/erp/nf-entrada/por-chaves` |
+
+O produto é buscado pela consulta livre com `PRO_CODIGO:igual`, e não pela rota
+em lote `/erp/produtos/fiscal`: só o operador `igual` sobre coluna única entra no
+agrupamento do outro lado. A rota em lote continua certa quando já se tem a
+lista inteira em mãos.
+
+### O que continua no OPENQUERY, e por quê
+
+* **`fetchEntradaXmlKeys`** — pede TODAS as chaves de `NF_ENTRADA_XML`. A API
+  recusa por construção: a tabela exige filtro e tem teto de linhas, justamente
+  para não permitir varredura sem recorte. Enquanto a carga inicial depender de
+  varrer a tabela inteira, ela fica no caminho antigo.
+* **`findSupplierProductLink`** — o de-para de código do fornecedor compara
+  `TRIM(COALESCE(...))` com duas variantes do código (com e sem zeros à
+  esquerda), mais descrição e unidade. A rota em lote da API usa o operador `em`,
+  que **não** aplica TRIM, e o ERP grava esse código com espaço à direita.
+* **`CTE_DISTRIBUICAO` e `CTE_ENTRADA_XML`** — ainda não estão no catálogo da
+  API. Só a confirmação do lançamento (`NF_ENTRADA`, modelo 57) migrou.
+* **`Stage_*`** — são tabelas do SQL Server, não do Firebird. Não têm nada a ver
+  com a API.
+
+### Uma diferença de comportamento
+
+Pela API, a lista de pendentes exige **período fechado**. O caminho por
+OPENQUERY, sem data informada, varre desde 01/2025 sem limite superior — a
+varredura sem recorte que a API existe para evitar. Sem data na chamada, o
+período usado é o mesmo default do serviço (90 dias). O cron já manda as duas
+datas (`NFE_SYNC_DIAS`, default 30), então na prática nada muda para ele.
+
+Se a lista de pendentes bater no teto de linhas da rota, o cliente trata como
+falha e a chamada volta para o OPENQUERY. Meia lista de sincronização é pior que
+nenhuma: as notas que ficaram de fora não voltariam a ser vistas.
