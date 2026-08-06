@@ -558,3 +558,31 @@ datas (`NFE_SYNC_DIAS`, default 30), então na prática nada muda para ele.
 Se a lista de pendentes bater no teto de linhas da rota, o cliente trata como
 falha e a chamada volta para o OPENQUERY. Meia lista de sincronização é pior que
 nenhuma: as notas que ficaram de fora não voltariam a ser vistas.
+
+### Quando a API não responde
+
+Todo desvio para o OPENQUERY loga antes de cair — não existe caminho silencioso.
+Se no log só aparece a linha de "leitura do ERP habilitada", tudo foi pela API.
+
+O `fetch` do Node embrulha qualquer problema de rede na mesma mensagem ("fetch
+failed") e guarda a causa real no `cause`; o cliente abre esse nível, porque cada
+causa pede uma correção diferente:
+
+| No log | O que fazer |
+|---|---|
+| `ENOTFOUND` | o nome não resolve **deste container**. DNS interno do EasyPanel só vale dentro do mesmo host. |
+| `ECONNREFUSED` | endereço certo, porta errada. Confira a `PORT` do container da API (8010 por padrão). |
+| `ETIMEDOUT` | saiu e não voltou: firewall, ou host de outra máquina. |
+| `DEPTH_ZERO_SELF_SIGNED_CERT` | o servidor apresenta certificado autoassinado — **não** foi a CA interna que emitiu. Instalar a CA não resolve. |
+| `UNABLE_TO_VERIFY_LEAF_SIGNATURE` | certificado é da CA interna, mas o container não a conhece: `NODE_EXTRA_CA_CERTS`. |
+| `HTTP 401` | `ERP_API_TOKEN` diferente do `APP_TOKEN` da API. |
+
+Sonda direta, de dentro do container do fiscal-service (mesma pilha de rede e
+TLS que o serviço usa):
+
+```bash
+node -e "fetch(process.env.ERP_API_URL+'/health').then(r=>r.text()).then(console.log).catch(e=>console.log('FALHOU:',e.cause?.code||e.cause?.message||e.message))"
+```
+
+Entre serviços do mesmo EasyPanel, prefira `http://<projeto>_erp-firebird-api:8010`:
+o tráfego não sai da rede do Docker e não há certificado para manter.

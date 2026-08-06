@@ -132,9 +132,49 @@ export class ErpApiService {
     }
   }
 
+  /**
+   * Motivo da falha em uma linha.
+   *
+   * `fetch` embrulha qualquer problema de rede numa mensagem única — "fetch
+   * failed" — e joga a causa real no `cause`. Sem abrir esse nível, o log não
+   * distingue nome que não resolve de porta fechada, de certificado recusado,
+   * e cada um deles pede uma correção diferente.
+   */
+  private motivo(erro: any): string {
+    if (erro?.name === 'TimeoutError' || erro?.name === 'AbortError') {
+      return `timeout de ${this.timeoutMs}ms`;
+    }
+
+    // Quando o host tem IPv4 e IPv6, o Node tenta os dois e embrulha as duas
+    // falhas num AggregateError — que não tem `code`. O motivo está nos filhos.
+    let causa: any = erro?.cause;
+    if (Array.isArray(causa?.errors) && causa.errors.length) causa = causa.errors[0];
+
+    const codigo = causa?.code ?? causa?.errno;
+    // Nem toda causa tem código (porta fora da faixa permitida, por exemplo,
+    // vem só como texto). A mensagem dela ainda é melhor que "fetch failed".
+    if (!codigo) return causa?.message || erro?.message || String(erro);
+
+    const onde = causa?.hostname ?? causa?.address;
+    const porta = causa?.port ? `:${causa.port}` : '';
+    const explicacao: Record<string, string> = {
+      ENOTFOUND: 'o nome não resolve neste container',
+      EAI_AGAIN: 'o DNS não respondeu',
+      ECONNREFUSED: 'o endereço resolve, mas ninguém atende nessa porta',
+      ECONNRESET: 'a conexão foi cortada pelo outro lado',
+      ETIMEDOUT: 'o pacote saiu e não voltou — normalmente firewall ou host errado',
+      DEPTH_ZERO_SELF_SIGNED_CERT: 'certificado autoassinado: não foi emitido pela CA interna',
+      UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'falta a CA interna no container (NODE_EXTRA_CA_CERTS)',
+      SELF_SIGNED_CERT_IN_CHAIN: 'falta a CA interna no container (NODE_EXTRA_CA_CERTS)',
+    };
+
+    const detalhe = explicacao[codigo] ? ` — ${explicacao[codigo]}` : '';
+    return `${codigo}${onde ? ` em ${onde}${porta}` : ''}${detalhe}`;
+  }
+
   private registrarFalha(caminho: string, erro: any) {
     this.falhasSeguidas++;
-    const motivo = erro?.name === 'TimeoutError' ? `timeout de ${this.timeoutMs}ms` : erro?.message || String(erro);
+    const motivo = this.motivo(erro);
 
     if (this.falhasSeguidas >= ErpApiService.LIMITE_FALHAS) {
       this.mudoAte = Date.now() + ErpApiService.COOLDOWN_MS;
