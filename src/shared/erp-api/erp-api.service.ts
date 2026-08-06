@@ -313,6 +313,28 @@ export class ErpApiService {
   }
 
   /**
+   * Itens de VÁRIAS notas de uma vez. Traz `NFE` junto porque, no lote, é o que
+   * diz de qual nota é cada item.
+   *
+   * Trunca se o conjunto passar do teto — e aqui truncar significaria auditar
+   * uma nota com itens faltando, que é pior que não auditar. Por isso a falha.
+   */
+  async nfeItensEmLote(nfes: number[], empresa = 1): Promise<any[]> {
+    if (!nfes.length) return [];
+    return this.pedir(
+      '/erp/nfe-itens',
+      {
+        empresa,
+        campos: 'NFE,ITEM,PRO_CODIGO,CFOP,CFOP_NOTA,CST,CST_FISCAL,ALIQ_ICMS,ST_VALOR',
+        f: `NFE:em:${nfes.join(',')}`,
+        ordenar: 'NFE,ITEM',
+        limite: 20_000,
+      },
+      { exigirCompleto: true },
+    );
+  }
+
+  /**
    * XML das notas, por chave. Máx. 50 por chamada — é BLOB, e o custo é por
    * nota. O teto é do outro lado; quem chama precisa fatiar antes.
    */

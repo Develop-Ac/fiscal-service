@@ -2247,6 +2247,45 @@ let IcmsService = IcmsService_1 = class IcmsService {
     async fetchLancamentoErp(chaveNfe) {
         return this.erpApi.comFallback(() => this.fetchLancamentoErpViaApi(chaveNfe), () => this.fetchLancamentoErpViaOpenQuery(chaveNfe));
     }
+    async fetchLancamentosErpEmLote(chaves) {
+        var _a;
+        const mapa = new Map();
+        if (!chaves.length || !this.erpApi.habilitado)
+            return mapa;
+        try {
+            const cabecalhos = [];
+            for (let i = 0; i < chaves.length; i += erp_api_service_1.ErpApiService.LOTE_CHAVES) {
+                cabecalhos.push(...(await this.erpApi.nfEntradaPorChaves(chaves.slice(i, i + erp_api_service_1.ErpApiService.LOTE_CHAVES))));
+            }
+            if (!cabecalhos.length)
+                return mapa;
+            const porChave = new Map();
+            for (const h of cabecalhos) {
+                const chave = String(h.CHAVE_NFE || '').trim();
+                if (!chave)
+                    continue;
+                const atual = porChave.get(chave);
+                if (!atual || Number(h.NFE) > Number(atual.NFE))
+                    porChave.set(chave, h);
+            }
+            const nfes = [...porChave.values()].map((h) => Number(h.NFE)).filter(Number.isFinite);
+            const itensPorNfe = new Map();
+            for (const item of await this.erpApi.nfeItensEmLote(nfes)) {
+                const nfe = Number(item.NFE);
+                if (!itensPorNfe.has(nfe))
+                    itensPorNfe.set(nfe, []);
+                itensPorNfe.get(nfe).push(item);
+            }
+            for (const [chave, header] of porChave) {
+                const itens = ((_a = itensPorNfe.get(Number(header.NFE))) !== null && _a !== void 0 ? _a : []).sort((a, b) => Number(a.ITEM) - Number(b.ITEM));
+                mapa.set(chave, { header, itens });
+            }
+        }
+        catch (_b) {
+            return new Map();
+        }
+        return mapa;
+    }
     async fetchLancamentoErpViaApi(chaveNfe) {
         const notas = await this.erpApi.nfEntradaPorChaves([chaveNfe]);
         if (!notas.length)
@@ -2292,10 +2331,10 @@ let IcmsService = IcmsService_1 = class IcmsService {
             return true;
         }
     }
-    async reconciliarStatusEntrada(chaveNfe) {
-        const erp = await this.fetchLancamentoErp(chaveNfe);
+    async reconciliarStatusEntrada(chaveNfe, lancamentoConhecido) {
+        const erp = lancamentoConhecido !== null && lancamentoConhecido !== void 0 ? lancamentoConhecido : (await this.fetchLancamentoErp(chaveNfe));
         if (erp)
-            return 'LANCADA';
+            return { status: 'LANCADA', lancamento: erp };
         const naDistribuicao = await this.existsInNfeDistribuicao(chaveNfe);
         const status = naDistribuicao ? 'PENDENTE' : 'EXCLUIDA';
         await this.prisma.nfeConciliacao.update({
@@ -2303,10 +2342,10 @@ let IcmsService = IcmsService_1 = class IcmsService {
             data: { status_erp: status, updated_at: new Date() },
         });
         this.logger.log(`Reconferência: NF ${chaveNfe} não está mais lançada no ERP → status ${status}.`, 'Auditoria');
-        return status;
+        return { status, lancamento: null };
     }
     async computarAuditoria(chaveNfe, opts = {}) {
-        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m;
         const nfeRow = await this.prisma.nfeConciliacao.findUnique({
             where: { chave_nfe: chaveNfe },
             select: { xml_completo: true },
@@ -2319,7 +2358,7 @@ let IcmsService = IcmsService_1 = class IcmsService {
         const nota = await this.parseNotaParaAuditoria(xml);
         if (!nota)
             return null;
-        const erp = await this.fetchLancamentoErp(chaveNfe);
+        const erp = (_a = opts.lancamento) !== null && _a !== void 0 ? _a : (await this.fetchLancamentoErp(chaveNfe));
         if (!erp)
             return null;
         const conf = await this.prisma.$queryRawUnsafe(`SELECT n_item, pro_codigo, imposto_escolhido, destinacao_mercadoria
@@ -2354,19 +2393,19 @@ let IcmsService = IcmsService_1 = class IcmsService {
                 notaByItem.set(it.nItem, it);
             let destinacaoIntra = null;
             if (intra) {
-                const destOpf = (_a = rules.opf.get(this.digitsOnly(h.OPF_CODIGO))) !== null && _a !== void 0 ? _a : this.destinacaoPorOpf(h.OPF_CODIGO);
+                const destOpf = (_b = rules.opf.get(this.digitsOnly(h.OPF_CODIGO))) !== null && _b !== void 0 ? _b : this.destinacaoPorOpf(h.OPF_CODIGO);
                 destinacaoIntra = destOpf === 'COMERCIALIZACAO' || destOpf === 'USO_CONSUMO' ? destOpf : null;
             }
             for (const ei of erp.itens) {
                 const nItem = Number(ei.ITEM);
-                const proCodigo = String((_b = ei.PRO_CODIGO) !== null && _b !== void 0 ? _b : '');
+                const proCodigo = String((_c = ei.PRO_CODIGO) !== null && _c !== void 0 ? _c : '');
                 const cfopLanc = this.digitsOnly(ei.CFOP);
                 const cstFiscalLanc = this.digitsOnly(ei.CST_FISCAL).padStart(3, '0');
                 const notaItem = notaByItem.get(nItem);
                 const cItem = confByItem.get(nItem);
                 const checks = [];
                 const prod = proCodigo ? await this.findInternalProduct(proCodigo, !!opts.produtoDireto) : null;
-                const descricao = (_c = prod === null || prod === void 0 ? void 0 : prod.PRO_DESCRICAO) !== null && _c !== void 0 ? _c : null;
+                const descricao = (_d = prod === null || prod === void 0 ? void 0 : prod.PRO_DESCRICAO) !== null && _d !== void 0 ? _d : null;
                 let imposto = null;
                 let destinacao = null;
                 if (cItem) {
@@ -2386,15 +2425,15 @@ let IcmsService = IcmsService_1 = class IcmsService {
                     destinacao = destSubtipo;
                 else if (intra && destinacaoIntra)
                     destinacao = destinacaoIntra;
-                const monofasico = this.isMonofasicoNcm(this.cleanDigits((_d = notaItem === null || notaItem === void 0 ? void 0 : notaItem.ncm) !== null && _d !== void 0 ? _d : ''));
+                const monofasico = this.isMonofasicoNcm(this.cleanDigits((_e = notaItem === null || notaItem === void 0 ? void 0 : notaItem.ncm) !== null && _e !== void 0 ? _e : ''));
                 const reg = this.regraEsperada(rules, imposto, destinacao, monofasico);
                 const cfopNota = this.digitsOnly(ei.CFOP_NOTA);
                 const ehSt = cItem
-                    ? String((_e = cItem.imposto_escolhido) !== null && _e !== void 0 ? _e : '').toUpperCase() === 'ST'
-                    : (String((_f = prod === null || prod === void 0 ? void 0 : prod.ST_CODIGO) !== null && _f !== void 0 ? _f : '').toUpperCase() === 'ST0-X' || !!String((_g = prod === null || prod === void 0 ? void 0 : prod.CEST) !== null && _g !== void 0 ? _g : '').trim());
+                    ? String((_f = cItem.imposto_escolhido) !== null && _f !== void 0 ? _f : '').toUpperCase() === 'ST'
+                    : (String((_g = prod === null || prod === void 0 ? void 0 : prod.ST_CODIGO) !== null && _g !== void 0 ? _g : '').toUpperCase() === 'ST0-X' || !!String((_h = prod === null || prod === void 0 ? void 0 : prod.CEST) !== null && _h !== void 0 ? _h : '').trim());
                 const expCfop = this.cfopRegraEsperada(rules, cfopNota, destinacao, ehSt);
-                const cfopExp = (_h = expCfop === null || expCfop === void 0 ? void 0 : expCfop.cfopEntrada) !== null && _h !== void 0 ? _h : (reg.cfopSufixo ? (intra ? '1' : '2') + reg.cfopSufixo : null);
-                const cstFinalExp = (_j = expCfop === null || expCfop === void 0 ? void 0 : expCfop.cstFinal) !== null && _j !== void 0 ? _j : reg.cstFinal;
+                const cfopExp = (_j = expCfop === null || expCfop === void 0 ? void 0 : expCfop.cfopEntrada) !== null && _j !== void 0 ? _j : (reg.cfopSufixo ? (intra ? '1' : '2') + reg.cfopSufixo : null);
+                const cstFinalExp = (_k = expCfop === null || expCfop === void 0 ? void 0 : expCfop.cstFinal) !== null && _k !== void 0 ? _k : reg.cstFinal;
                 if (cfopExp) {
                     checks.push({ campo: 'CFOP', esperado: cfopExp, encontrado: cfopLanc || '', ok: !cfopLanc || cfopLanc === cfopExp });
                 }
@@ -2406,7 +2445,7 @@ let IcmsService = IcmsService_1 = class IcmsService {
                     checks.push({ campo: 'CST final', esperado: cstFinalExp, encontrado: enc, ok: !enc || enc === cstFinalExp });
                 }
                 if ((notaItem === null || notaItem === void 0 ? void 0 : notaItem.origemNota) && cstFiscalLanc.length === 3) {
-                    const origemExp = (_k = rules.origem.get(notaItem.origemNota)) !== null && _k !== void 0 ? _k : this.origemEsperada(notaItem.origemNota);
+                    const origemExp = (_l = rules.origem.get(notaItem.origemNota)) !== null && _l !== void 0 ? _l : this.origemEsperada(notaItem.origemNota);
                     const enc = cstFiscalLanc.slice(0, 1);
                     checks.push({ campo: 'CST origem', esperado: origemExp, encontrado: enc, ok: enc === origemExp });
                 }
@@ -2415,7 +2454,7 @@ let IcmsService = IcmsService_1 = class IcmsService {
                 }
                 else if (prod) {
                     const pc = this.pisCofinsEsperado(prod.SUBTIPO, monofasico);
-                    const stEsperado = String((_l = prod.CEST) !== null && _l !== void 0 ? _l : '').trim() ? 'ST0-X' : null;
+                    const stEsperado = String((_m = prod.CEST) !== null && _m !== void 0 ? _m : '').trim() ? 'ST0-X' : null;
                     const cad = [
                         ['Cadastro ST_CODIGO', stEsperado, prod.ST_CODIGO],
                         ['Cadastro PIS', pc.pis, prod.PIS_CODIGO],
@@ -2475,7 +2514,10 @@ let IcmsService = IcmsService_1 = class IcmsService {
                 where: { chave_nfe: chaveNfe },
                 select: { auditoria_alerta_em: true },
             });
-            const r = await this.computarAuditoria(chaveNfe, { produtoDireto: opts.produtoDireto });
+            const r = await this.computarAuditoria(chaveNfe, {
+                produtoDireto: opts.produtoDireto,
+                lancamento: opts.lancamento,
+            });
             if (!r)
                 return;
             const erros = this.errosFromComputado(r);
@@ -2740,10 +2782,11 @@ let IcmsService = IcmsService_1 = class IcmsService {
         const chaveRows = await this.prisma.$queryRawUnsafe(`SELECT c.chave_nfe FROM com_nfe_conciliacao c WHERE ${where}
              ORDER BY c.dt_entrada DESC NULLS LAST LIMIT 2000`, ...params);
         const chaves = chaveRows.map((r) => r.chave_nfe);
+        const lancamentos = await this.fetchLancamentosErpEmLote(chaves);
         for (const chave of chaves) {
-            const status = await this.reconciliarStatusEntrada(chave);
+            const { status, lancamento } = await this.reconciliarStatusEntrada(chave, lancamentos.get(chave));
             if (status === 'LANCADA') {
-                await this.auditarLancamentoFiscal(chave, { enviarAlerta: false, produtoDireto: true });
+                await this.auditarLancamentoFiscal(chave, { enviarAlerta: false, produtoDireto: true, lancamento });
             }
         }
         const sumRows = await this.prisma.$queryRawUnsafe(`SELECT auditoria_fiscal_status AS s, count(*)::int AS c
@@ -2756,6 +2799,7 @@ let IcmsService = IcmsService_1 = class IcmsService {
         };
     }
     async reauditarPendentesAlerta(diasJanela = 7, limite = 300) {
+        var _a;
         const dias = Number.isFinite(diasJanela) && diasJanela > 0 ? Math.floor(diasJanela) : 7;
         const agora = new Date();
         const cutoff = new Date(agora.getTime() - dias * 24 * 60 * 60 * 1000);
@@ -2769,8 +2813,12 @@ let IcmsService = IcmsService_1 = class IcmsService {
             orderBy: { dt_entrada: 'desc' },
             take: Math.max(1, Math.floor(limite)),
         });
+        const lancamentos = await this.fetchLancamentosErpEmLote(pendentes.map((n) => n.chave_nfe));
         for (const n of pendentes) {
-            await this.auditarLancamentoFiscal(n.chave_nfe, { produtoDireto: true });
+            await this.auditarLancamentoFiscal(n.chave_nfe, {
+                produtoDireto: true,
+                lancamento: (_a = lancamentos.get(n.chave_nfe)) !== null && _a !== void 0 ? _a : null,
+            });
         }
         return { avaliadas: pendentes.length };
     }
@@ -2927,9 +2975,9 @@ let IcmsService = IcmsService_1 = class IcmsService {
         };
     }
     async reconferirAuditoria(chaveNfe) {
-        const status = await this.reconciliarStatusEntrada(chaveNfe);
+        const { status, lancamento } = await this.reconciliarStatusEntrada(chaveNfe);
         if (status === 'LANCADA') {
-            await this.auditarLancamentoFiscal(chaveNfe, { enviarAlerta: false, produtoDireto: true });
+            await this.auditarLancamentoFiscal(chaveNfe, { enviarAlerta: false, produtoDireto: true, lancamento });
         }
         return this.getAuditoriaDetalhe(chaveNfe, true);
     }

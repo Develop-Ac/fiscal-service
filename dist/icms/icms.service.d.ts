@@ -186,6 +186,7 @@ export declare class IcmsService {
     }>;
     private parseNotaParaAuditoria;
     private fetchLancamentoErp;
+    private fetchLancamentosErpEmLote;
     private fetchLancamentoErpViaApi;
     private fetchLancamentoErpViaOpenQuery;
     private existsInNfeDistribuicao;

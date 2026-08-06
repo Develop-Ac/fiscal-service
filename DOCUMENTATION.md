@@ -559,6 +559,33 @@ Se a lista de pendentes bater no teto de linhas da rota, o cliente trata como
 falha e a chamada volta para o OPENQUERY. Meia lista de sincronização é pior que
 nenhuma: as notas que ficaram de fora não voltariam a ser vistas.
 
+### Auditoria em lote (agosto/2026)
+
+O detector de N+1 da API apontou, no primeiro dia: a reauditoria periódica
+consultava o ERP **nota a nota** — 2 consultas por nota (cabeçalho em
+`NF_ENTRADA` + itens em `NFE_ITENS`), e nenhuma delas agrupável, porque o filtro
+que varia é a chave e não uma coluna única.
+
+Os dois laços que já conhecem a lista de chaves antes de começar
+(`reauditarPendentesAlerta`, do cron, e `reconferirPeriodo`, do botão de
+reconferir) passaram a buscar tudo de uma vez em `fetchLancamentosErpEmLote`, e
+a auditoria de cada nota recebe o lançamento pronto. Medido com 30 notas reais:
+
+```
+lote       30 notas ·  2 consultas no Firebird ·   91ms
+individual 30 notas · 60 consultas no Firebird · 1100ms
+resultado idêntico em 30/30
+```
+
+Chave que não vier no lote continua sendo confirmada individualmente: ausência
+não prova que a nota saiu do ERP — pode ser que o lote nem tenha rodado. E, sem
+`ERP_API_URL`, o lote devolve mapa vazio e os laços seguem nota a nota, como
+antes.
+
+O que sobra de unitário é a busca de produto (`produtos.PRO_CODIGO`), e ali o
+aviso é diferente: *"o agrupador está juntando essas chamadas"*. Continua sendo
+uma requisição HTTP por item, mas não uma consulta ao Firebird por item.
+
 ### Quando a API não responde
 
 Todo desvio para o OPENQUERY loga antes de cair — não existe caminho silencioso.

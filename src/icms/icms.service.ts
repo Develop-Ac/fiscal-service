@@ -16,6 +16,9 @@ import archiver from 'archiver';
 import { Writable } from 'stream';
 import * as Minio from 'minio';
 
+/** Lançamento da NF no ERP: cabeçalho de NF_ENTRADA + itens de NFE_ITENS. */
+type LancamentoErp = { header: any; itens: any[] };
+
 type GuiaPdfExtractedData = {
     numeroDocumento: string | null;
     dataVencimento: Date | null;
@@ -2832,6 +2835,60 @@ export class IcmsService {
         );
     }
 
+    /**
+     * Lançamento de VÁRIAS notas de uma vez, para os laços que já sabem a lista
+     * de chaves antes de começar.
+     *
+     * São 2 consultas ao ERP no total, em vez de 2 por nota. Chave que não vier
+     * no mapa simplesmente não está lançada — quem chama trata como antes.
+     *
+     * Só existe pelo caminho da API; sem ela, devolve mapa vazio e o laço segue
+     * nota a nota pelo OPENQUERY, exatamente como fazia.
+     */
+    private async fetchLancamentosErpEmLote(chaves: string[]): Promise<Map<string, LancamentoErp>> {
+        const mapa = new Map<string, LancamentoErp>();
+        if (!chaves.length || !this.erpApi.habilitado) return mapa;
+
+        try {
+            const cabecalhos: any[] = [];
+            for (let i = 0; i < chaves.length; i += ErpApiService.LOTE_CHAVES) {
+                cabecalhos.push(...(await this.erpApi.nfEntradaPorChaves(chaves.slice(i, i + ErpApiService.LOTE_CHAVES))));
+            }
+            if (!cabecalhos.length) return mapa;
+
+            // Num relançamento a mesma chave tem mais de uma linha concluída;
+            // vale a de maior NFE, o mesmo critério da busca individual.
+            const porChave = new Map<string, any>();
+            for (const h of cabecalhos) {
+                const chave = String(h.CHAVE_NFE || '').trim();
+                if (!chave) continue;
+                const atual = porChave.get(chave);
+                if (!atual || Number(h.NFE) > Number(atual.NFE)) porChave.set(chave, h);
+            }
+
+            const nfes = [...porChave.values()].map((h) => Number(h.NFE)).filter(Number.isFinite);
+            const itensPorNfe = new Map<number, any[]>();
+            for (const item of await this.erpApi.nfeItensEmLote(nfes)) {
+                const nfe = Number(item.NFE);
+                if (!itensPorNfe.has(nfe)) itensPorNfe.set(nfe, []);
+                itensPorNfe.get(nfe)!.push(item);
+            }
+
+            for (const [chave, header] of porChave) {
+                const itens = (itensPorNfe.get(Number(header.NFE)) ?? []).sort(
+                    (a, b) => Number(a.ITEM) - Number(b.ITEM),
+                );
+                mapa.set(chave, { header, itens });
+            }
+        } catch {
+            // Falha no lote não pode custar a auditoria: mapa vazio devolve o
+            // laço para a busca nota a nota, que tem o seu próprio fallback.
+            return new Map();
+        }
+
+        return mapa;
+    }
+
     private async fetchLancamentoErpViaApi(chaveNfe: string) {
         const notas = await this.erpApi.nfEntradaPorChaves([chaveNfe]);
         if (!notas.length) return null;
@@ -2914,9 +2971,18 @@ export class IcmsService {
      *  - voltou para NFE_DISTRIBUICAO  -> PENDENTE;
      *  - sumiu das duas               -> EXCLUIDA (sai da auditoria).
      */
-    private async reconciliarStatusEntrada(chaveNfe: string): Promise<'LANCADA' | 'PENDENTE' | 'EXCLUIDA'> {
-        const erp = await this.fetchLancamentoErp(chaveNfe);
-        if (erp) return 'LANCADA';
+    private async reconciliarStatusEntrada(
+        chaveNfe: string,
+        lancamentoConhecido?: LancamentoErp | null,
+    ): Promise<{ status: 'LANCADA' | 'PENDENTE' | 'EXCLUIDA'; lancamento: LancamentoErp | null }> {
+        // Ausência no lote não prova que a nota saiu do ERP — pode ser que o
+        // lote nem tenha rodado. Sem lançamento conhecido, confirma nota a nota.
+        const erp = lancamentoConhecido ?? (await this.fetchLancamentoErp(chaveNfe));
+        // Devolve o lançamento junto: quem chama audita em seguida e precisaria
+        // exatamente do mesmo cabeçalho e dos mesmos itens. Buscar de novo seria
+        // dobrar as idas ao ERP por nota, num laço que já roda nota a nota.
+        if (erp) return { status: 'LANCADA', lancamento: erp };
+
         const naDistribuicao = await this.existsInNfeDistribuicao(chaveNfe);
         const status = naDistribuicao ? 'PENDENTE' : 'EXCLUIDA';
         await this.prisma.nfeConciliacao.update({
@@ -2924,7 +2990,7 @@ export class IcmsService {
             data: { status_erp: status, updated_at: new Date() },
         });
         this.logger.log(`Reconferência: NF ${chaveNfe} não está mais lançada no ERP → status ${status}.`, 'Auditoria');
-        return status;
+        return { status, lancamento: null };
     }
 
     /**
@@ -2932,7 +2998,10 @@ export class IcmsService {
      * conferência marcada como ok/divergente, com código e descrição do produto.
      * Base única para persistir, alertar e exibir o detalhe. null = não auditável.
      */
-    private async computarAuditoria(chaveNfe: string, opts: { produtoDireto?: boolean } = {}): Promise<{
+    private async computarAuditoria(
+        chaveNfe: string,
+        opts: { produtoDireto?: boolean; lancamento?: LancamentoErp | null } = {},
+    ): Promise<{
         nota: any;
         header: any;
         semConferencia: boolean;
@@ -2951,7 +3020,8 @@ export class IcmsService {
         const nota = await this.parseNotaParaAuditoria(xml);
         if (!nota) return null;
 
-        const erp = await this.fetchLancamentoErp(chaveNfe);
+        // Quem já reconciliou o status acabou de buscar este mesmo lançamento.
+        const erp = opts.lancamento ?? (await this.fetchLancamentoErp(chaveNfe));
         if (!erp) return null;
 
         const conf = await this.prisma.$queryRawUnsafe<any[]>(
@@ -3131,14 +3201,20 @@ export class IcmsService {
      * Audita o lançamento de uma NF que virou LANCADA: persiste o resultado e,
      * havendo erro, alerta o grupo via n8n/WAHA. Nunca lança; alerta 1x por NF.
      */
-    private async auditarLancamentoFiscal(chaveNfe: string, opts: { enviarAlerta?: boolean; produtoDireto?: boolean } = {}): Promise<void> {
+    private async auditarLancamentoFiscal(
+        chaveNfe: string,
+        opts: { enviarAlerta?: boolean; produtoDireto?: boolean; lancamento?: LancamentoErp | null } = {},
+    ): Promise<void> {
         const enviarAlerta = opts.enviarAlerta !== false;
         try {
             const nfeRow: any = await this.prisma.nfeConciliacao.findUnique({
                 where: { chave_nfe: chaveNfe },
                 select: { auditoria_alerta_em: true },
             });
-            const r = await this.computarAuditoria(chaveNfe, { produtoDireto: opts.produtoDireto });
+            const r = await this.computarAuditoria(chaveNfe, {
+                produtoDireto: opts.produtoDireto,
+                lancamento: opts.lancamento,
+            });
             if (!r) return;
 
             const erros = this.errosFromComputado(r);
@@ -3468,10 +3544,15 @@ export class IcmsService {
             ...params,
         );
         const chaves = chaveRows.map((r) => r.chave_nfe);
+
+        // Até 2000 notas neste laço: buscar o lançamento de uma vez tira 2 idas
+        // ao ERP por nota. As que não vierem no lote são confirmadas uma a uma.
+        const lancamentos = await this.fetchLancamentosErpEmLote(chaves);
+
         for (const chave of chaves) {
-            const status = await this.reconciliarStatusEntrada(chave);
+            const { status, lancamento } = await this.reconciliarStatusEntrada(chave, lancamentos.get(chave));
             if (status === 'LANCADA') {
-                await this.auditarLancamentoFiscal(chave, { enviarAlerta: false, produtoDireto: true });
+                await this.auditarLancamentoFiscal(chave, { enviarAlerta: false, produtoDireto: true, lancamento });
             }
         }
         const sumRows = await this.prisma.$queryRawUnsafe<any[]>(
@@ -3519,9 +3600,16 @@ export class IcmsService {
             orderBy: { dt_entrada: 'desc' },
             take: Math.max(1, Math.floor(limite)),
         });
+        // A lista inteira já é conhecida aqui: busca os lançamentos de uma vez em
+        // vez de deixar cada auditoria perguntar ao ERP pela sua nota.
+        const lancamentos = await this.fetchLancamentosErpEmLote(pendentes.map((n) => n.chave_nfe));
+
         for (const n of pendentes) {
             // enviarAlerta default true; produtoDireto p/ ler o cadastro vigente do ERP.
-            await this.auditarLancamentoFiscal(n.chave_nfe, { produtoDireto: true });
+            await this.auditarLancamentoFiscal(n.chave_nfe, {
+                produtoDireto: true,
+                lancamento: lancamentos.get(n.chave_nfe) ?? null,
+            });
         }
         return { avaliadas: pendentes.length };
     }
@@ -3721,10 +3809,10 @@ export class IcmsService {
     /** Reexecuta a auditoria manualmente (sem disparar o WhatsApp) e devolve o detalhe. */
     async reconferirAuditoria(chaveNfe: string) {
         // 1. Reconcilia o status com o ERP (pode virar PENDENTE/EXCLUIDA).
-        const status = await this.reconciliarStatusEntrada(chaveNfe);
+        const { status, lancamento } = await this.reconciliarStatusEntrada(chaveNfe);
         // 2. Só audita se ainda estiver lançada; cadastro direto do ERP (sem ETL).
         if (status === 'LANCADA') {
-            await this.auditarLancamentoFiscal(chaveNfe, { enviarAlerta: false, produtoDireto: true });
+            await this.auditarLancamentoFiscal(chaveNfe, { enviarAlerta: false, produtoDireto: true, lancamento });
         }
         return this.getAuditoriaDetalhe(chaveNfe, true);
     }
