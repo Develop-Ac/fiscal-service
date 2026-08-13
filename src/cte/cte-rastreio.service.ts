@@ -55,9 +55,16 @@ const MAX_POR_RODADA = Number(process.env.SSW_TRACKING_MAX_POR_RODADA) || 150;
 // Concorrência de chamadas simultâneas ao SSW.
 const CONCORRENCIA = Number(process.env.SSW_TRACKING_CONCORRENCIA) || 5;
 // Após N consultas sem documento localizado, marca o CT-e como SEM_RASTREIO.
+// As tentativas contam NO MÁXIMO UMA POR DIA (não uma por rodada): a transportadora
+// registra a NF no SSW dias depois da emissão, e contar por rodada queimava as 6
+// tentativas em ~3h de cron — CT-es entregues ficavam "sem rastreio" para sempre.
 const TENT_CTE_SEM_RASTREIO = Number(process.env.SSW_TRACKING_TENT_CTE) || 6;
 // Após N falhas acumuladas, marca a transportadora (CNPJ-raiz) como fora do SSW.
 const TENT_TRANSP_SEM_SSW = Number(process.env.SSW_TRACKING_TENT_TRANSP) || 8;
+// Transportadora marcada fora do SSW volta a ser SONDADA após N dias (uma consulta
+// de prova por rodada): sem isso a lista negra era permanente e transportadoras que
+// entram no SSW (ou entraram errado na lista) nunca voltavam a rastrear.
+const SONDA_TRANSP_DIAS = Number(process.env.SSW_TRACKING_SONDA_TRANSP_DIAS) || 7;
 
 @Injectable()
 export class CteRastreioService {
@@ -210,16 +217,29 @@ export class CteRastreioService {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - JANELA_DIAS);
 
+    // Meia-noite local — âncora do "no máximo uma tentativa por dia" e da
+    // re-tentativa diária de SEM_RASTREIO.
+    const inicioHoje = new Date();
+    inicioHoje.setHours(0, 0, 0, 0);
+
     // Candidatos: PENDENTE (LANCADA já chegou → não gasta API), dentro da janela,
-    // ainda não entregue e ainda não marcado como sem rastreio. Os nunca-consultados
-    // (rastreio_ult_consulta = null) vêm primeiro.
+    // ainda não entregue. Os nunca-consultados (rastreio_ult_consulta = null) vêm
+    // primeiro. SEM_RASTREIO NÃO é mais definitivo: enquanto o CT-e está na janela,
+    // ele volta à fila UMA vez por dia — a transportadora pode registrar o documento
+    // no SSW dias depois da emissão.
     const candidatos = await this.prisma.cteDocumento.findMany({
       where: {
         status: 'PENDENTE',
         data_emissao: { gte: cutoff },
         AND: [
           { OR: [{ rastreio_status: null }, { rastreio_status: 'EM_TRANSITO' }] },
-          { OR: [{ rastreio_cobertura: null }, { rastreio_cobertura: 'COBERTO' }] },
+          {
+            OR: [
+              { rastreio_cobertura: null },
+              { rastreio_cobertura: 'COBERTO' },
+              { rastreio_cobertura: 'SEM_RASTREIO', rastreio_ult_consulta: { lt: inicioHoje } },
+            ],
+          },
         ],
       },
       select: {
@@ -228,6 +248,8 @@ export class CteRastreioService {
         emitente_nome: true,
         dados_json: true,
         rastreio_tentativas: true,
+        rastreio_ult_consulta: true,
+        rastreio_cobertura: true,
       },
       orderBy: [{ rastreio_ult_consulta: { sort: 'asc', nulls: 'first' } }],
       take: MAX_POR_RODADA,
@@ -247,17 +269,31 @@ export class CteRastreioService {
     let erros = 0;
     let consultados = 0;
 
+    // Uma SONDA por transportadora por rodada: revalida a lista negra sem
+    // multiplicar chamadas quando vários CT-es dela caem na mesma rodada.
+    const sondadas = new Set<string>();
+
     for (const lote of chunk(candidatos, CONCORRENCIA)) {
       await Promise.all(
         lote.map(async (cte) => {
           const raiz = raizCnpj(cte.emitente_cnpj);
           const cov = raiz ? covMap.get(raiz) : undefined;
 
-          // Transportadora já sabidamente fora do SSW → marca e não chama a API.
+          // Transportadora sabidamente fora do SSW → marca sem chamar a API,
+          // EXCETO quando a verificação venceu (SONDA_TRANSP_DIAS): aí um CT-e
+          // segue como sonda e, se o SSW responder, a cobertura vira `true` e a
+          // transportadora inteira volta a rastrear.
           if (cov && cov.coberta === false) {
-            await this.marcarSemRastreio(cte.chave_acesso);
-            semRastreio++;
-            return;
+            const verificadaEm = cov.ultima_verificacao
+              ? new Date(cov.ultima_verificacao).getTime()
+              : 0;
+            const vencida = Date.now() - verificadaEm > SONDA_TRANSP_DIAS * 86_400_000;
+            if (!vencida || sondadas.has(raiz!)) {
+              await this.marcarSemRastreio(cte.chave_acesso);
+              semRastreio++;
+              return;
+            }
+            sondadas.add(raiz!);
           }
 
           const chaveNfe = primeiraChaveNfe(cte.dados_json);
@@ -277,12 +313,32 @@ export class CteRastreioService {
             const dominio = resp.tracking.find((t) => t.dominio)?.dominio || null;
             await this.registrarCoberturaTransportadora(raiz, cte.emitente_nome, true, dominio, covMap);
           } else if (resp.success) {
-            // Respondeu sem eventos — trata como em trânsito sem movimento ainda.
-            await this.tocarConsulta(cte.chave_acesso);
+            // Respondeu sem eventos — o documento EXISTE no SSW, só não se moveu.
+            // Se o CT-e estava marcado SEM_RASTREIO (re-tentativa), a marca cai:
+            // ele volta à fila normal e as tentativas zeram.
+            if (cte.rastreio_cobertura === 'SEM_RASTREIO') {
+              await this.prisma.cteDocumento
+                .update({
+                  where: { chave_acesso: cte.chave_acesso },
+                  data: {
+                    rastreio_cobertura: null,
+                    rastreio_tentativas: 0,
+                    rastreio_ult_consulta: new Date(),
+                  },
+                })
+                .catch(() => undefined);
+            } else {
+              await this.tocarConsulta(cte.chave_acesso);
+            }
           } else if (/localizado|inválida|nenhum/i.test(resp.message || '')) {
-            // Documento não encontrado no SSW: conta tentativa.
-            const novasTent = (cte.rastreio_tentativas || 0) + 1;
-            if (novasTent >= TENT_CTE_SEM_RASTREIO) {
+            // Documento não encontrado no SSW: conta tentativa — NO MÁXIMO UMA POR
+            // DIA. A primeira falha do dia conta (a última consulta é de ontem ou
+            // nunca houve); as rodadas seguintes do mesmo dia só tocam a consulta.
+            // O mesmo vale para as falhas da TRANSPORTADORA: sem o teto diário, a
+            // lista negra fechava em 8 rodadas (~4h) de um único CT-e recém-emitido.
+            const contaHoje = !cte.rastreio_ult_consulta || cte.rastreio_ult_consulta < inicioHoje;
+            const novasTent = (cte.rastreio_tentativas || 0) + (contaHoje ? 1 : 0);
+            if (contaHoje && novasTent >= TENT_CTE_SEM_RASTREIO) {
               await this.marcarSemRastreio(cte.chave_acesso);
               semRastreio++;
             } else {
@@ -291,7 +347,9 @@ export class CteRastreioService {
                 data: { rastreio_tentativas: novasTent, rastreio_ult_consulta: new Date() },
               });
             }
-            await this.registrarCoberturaTransportadora(raiz, cte.emitente_nome, false, null, covMap);
+            if (contaHoje) {
+              await this.registrarCoberturaTransportadora(raiz, cte.emitente_nome, false, null, covMap);
+            }
           } else {
             // Erro de comunicação: não penaliza cobertura, só toca a consulta.
             erros++;
