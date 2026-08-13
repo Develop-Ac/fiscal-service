@@ -1,0 +1,245 @@
+import { Injectable, Logger } from '@nestjs/common';
+import * as Minio from 'minio';
+import { PrismaService } from '../prisma/prisma.service';
+
+export interface EscDocumentoRow {
+    id: number;
+    tipo: string;
+    tipo_label: string;
+    data_documento: string;
+    descricao: string | null;
+    nome_arquivo: string | null;
+    tamanho_bytes: number | null;
+    nf_numero: string | null;
+    chave_nfe: string | null;
+    fornecedor_nome: string | null;
+    fornecedor_cnpj: string | null;
+    criado_em: string;
+}
+
+export interface ListFilters {
+    from?: string;
+    to?: string;
+    tipo?: string;
+    q?: string;
+    page: number;
+    pageSize: number;
+}
+
+/** Rótulos amigáveis dos tipos gravados pelo escaner-fiscal-app. */
+const TIPO_LABELS: Record<string, string> = {
+    'nao-fiscal': 'Não fiscal',
+    'recibo': 'Recibo',
+    'cupom-fiscal': 'Cupom fiscal',
+    'comprovante-outros': 'Comprovante/Outros',
+    'guia-icms-st': 'Guia ICMS-ST',
+};
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Documentos do Movimento Fiscal (escaner-fiscal-app): leitura de esc_documento
+ * + download/export dos PDFs no MinIO (bucket movimento-fiscal, gravado por linha).
+ * Somente leitura — o arquivo fiscal não se apaga por aqui.
+ */
+@Injectable()
+export class EscanerService {
+    private readonly logger = new Logger(EscanerService.name);
+    private readonly minioBucket = process.env.MINIO_BUCKET || 'documentos';
+    private minioClient: Minio.Client | null = null;
+
+    constructor(private readonly prisma: PrismaService) {}
+
+    async listDocumentos(filters: ListFilters) {
+        const where: string[] = [];
+        const params: unknown[] = [];
+        const add = (sql: string, value: unknown) => {
+            params.push(value);
+            where.push(sql.replace('?', `$${params.length}`));
+        };
+
+        if (filters.from && ISO_DATE.test(filters.from)) add('data_documento >= ?::date', filters.from);
+        if (filters.to && ISO_DATE.test(filters.to)) add('data_documento <= ?::date', filters.to);
+        if (filters.tipo) add('tipo = ?', filters.tipo);
+        if (filters.q) {
+            params.push(`%${filters.q}%`);
+            const p = `$${params.length}`;
+            where.push(
+                `(descricao ILIKE ${p} OR nome_arquivo ILIKE ${p} OR nf_numero ILIKE ${p} OR fornecedor_nome ILIKE ${p} OR fornecedor_cnpj ILIKE ${p})`,
+            );
+        }
+
+        const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+        const offset = (filters.page - 1) * filters.pageSize;
+
+        try {
+            const countRows = await this.prisma.$queryRawUnsafe<{ total: bigint }[]>(
+                `SELECT COUNT(*)::bigint AS total FROM esc_documento ${whereSql}`,
+                ...params,
+            );
+            const total = Number(countRows[0]?.total ?? 0);
+
+            const rows = await this.prisma.$queryRawUnsafe<any[]>(
+                `
+                SELECT
+                    id, tipo,
+                    -- DATE direto vira meia-noite local e o fuso empurra o dia p/ trás
+                    to_char(data_documento, 'YYYY-MM-DD') AS data_documento,
+                    descricao, nome_arquivo, tamanho_bytes,
+                    nf_numero, chave_nfe, fornecedor_nome, fornecedor_cnpj,
+                    to_char(criado_em, 'YYYY-MM-DD"T"HH24:MI:SS') AS criado_em
+                FROM esc_documento
+                ${whereSql}
+                ORDER BY data_documento DESC, criado_em DESC
+                LIMIT ${filters.pageSize} OFFSET ${offset}
+                `,
+                ...params,
+            );
+
+            const documentos: EscDocumentoRow[] = rows.map((r) => ({
+                id: Number(r.id),
+                tipo: String(r.tipo ?? ''),
+                tipo_label: TIPO_LABELS[String(r.tipo ?? '')] ?? String(r.tipo ?? ''),
+                data_documento: String(r.data_documento ?? ''),
+                descricao: r.descricao ?? null,
+                nome_arquivo: r.nome_arquivo ?? null,
+                tamanho_bytes: r.tamanho_bytes == null ? null : Number(r.tamanho_bytes),
+                nf_numero: r.nf_numero ?? null,
+                chave_nfe: r.chave_nfe ?? null,
+                fornecedor_nome: r.fornecedor_nome ?? null,
+                fornecedor_cnpj: r.fornecedor_cnpj ?? null,
+                criado_em: String(r.criado_em ?? ''),
+            }));
+
+            return { total, page: filters.page, pageSize: filters.pageSize, documentos };
+        } catch (error) {
+            if (this.semTabelaDoScan(error)) {
+                return { total: 0, page: filters.page, pageSize: filters.pageSize, documentos: [] };
+            }
+            throw error;
+        }
+    }
+
+    /** Tipos existentes no arquivo (para o filtro da tela). */
+    async listTipos() {
+        try {
+            const rows = await this.prisma.$queryRawUnsafe<{ tipo: string; total: bigint }[]>(
+                `SELECT tipo, COUNT(*)::bigint AS total FROM esc_documento GROUP BY tipo ORDER BY tipo`,
+            );
+            return rows.map((r) => ({
+                tipo: r.tipo,
+                label: TIPO_LABELS[r.tipo] ?? r.tipo,
+                total: Number(r.total),
+            }));
+        } catch (error) {
+            if (this.semTabelaDoScan(error)) return [];
+            throw error;
+        }
+    }
+
+    /** Stream do PDF de um documento. */
+    async downloadDocumento(id: number) {
+        const idNum = Number(id);
+        if (!Number.isInteger(idNum) || idNum <= 0) return null;
+
+        let rows: any[] = [];
+        try {
+            rows = await this.prisma.$queryRawUnsafe<any[]>(
+                `SELECT minio_bucket, minio_key, nome_arquivo FROM esc_documento WHERE id = $1`,
+                idNum,
+            );
+        } catch (error) {
+            if (this.semTabelaDoScan(error)) return null;
+            throw error;
+        }
+
+        const doc = rows[0];
+        if (!doc?.minio_key) return null;
+
+        const client = this.getMinioClient();
+        const stream = await client.getObject(doc.minio_bucket || this.minioBucket, doc.minio_key);
+        const fileName = String(doc.nome_arquivo || `documento-${idNum}.pdf`);
+        return { stream, fileName };
+    }
+
+    /** Documentos do período para o export em lote (zip). */
+    async listParaExport(filters: { from?: string; to?: string; tipo?: string }) {
+        const where: string[] = [];
+        const params: unknown[] = [];
+        const add = (sql: string, value: unknown) => {
+            params.push(value);
+            where.push(sql.replace('?', `$${params.length}`));
+        };
+        if (filters.from && ISO_DATE.test(filters.from)) add('data_documento >= ?::date', filters.from);
+        if (filters.to && ISO_DATE.test(filters.to)) add('data_documento <= ?::date', filters.to);
+        if (filters.tipo) add('tipo = ?', filters.tipo);
+        const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+        try {
+            const rows = await this.prisma.$queryRawUnsafe<any[]>(
+                `
+                SELECT id, tipo, to_char(data_documento, 'YYYY-MM-DD') AS data_documento,
+                       minio_bucket, minio_key, nome_arquivo
+                FROM esc_documento
+                ${whereSql}
+                ORDER BY data_documento, id
+                `,
+                ...params,
+            );
+            return rows.map((r) => ({
+                id: Number(r.id),
+                tipo: String(r.tipo ?? ''),
+                dataDocumento: String(r.data_documento ?? ''),
+                bucket: String(r.minio_bucket || this.minioBucket),
+                key: String(r.minio_key ?? ''),
+                nomeArquivo: String(r.nome_arquivo || `documento-${r.id}.pdf`),
+            }));
+        } catch (error) {
+            if (this.semTabelaDoScan(error)) return [];
+            throw error;
+        }
+    }
+
+    getObjectStream(bucket: string, key: string) {
+        return this.getMinioClient().getObject(bucket, key);
+    }
+
+    // -------- MinIO (mesmas envs do restante do serviço) --------
+    private getMinioClient() {
+        if (this.minioClient) return this.minioClient;
+
+        const rawEndpoint = String(process.env.MINIO_ENDPOINT || '').trim();
+        const accessKey = process.env.MINIO_ACCESS_KEY;
+        const secretKey = process.env.MINIO_SECRET_KEY;
+        if (!rawEndpoint || !accessKey || !secretKey) {
+            throw new Error(
+                'Configuração MinIO incompleta: MINIO_ENDPOINT, MINIO_ACCESS_KEY e MINIO_SECRET_KEY são obrigatórios.',
+            );
+        }
+
+        let endPoint = rawEndpoint;
+        let port = Number(process.env.MINIO_PORT || 9000);
+        let useSSL = String(process.env.MINIO_USE_SSL || 'false').toLowerCase() === 'true';
+
+        if (/^https?:\/\//i.test(rawEndpoint)) {
+            const url = new URL(rawEndpoint);
+            endPoint = url.hostname;
+            if (url.port) port = Number(url.port);
+            else if (!process.env.MINIO_PORT) port = url.protocol === 'https:' ? 443 : 80;
+            if (!process.env.MINIO_USE_SSL) useSSL = url.protocol === 'https:';
+        }
+
+        this.minioClient = new Minio.Client({ endPoint, port, useSSL, accessKey, secretKey });
+        return this.minioClient;
+    }
+
+    /** Instalações sem o DDL do scan aplicado: devolve vazio em vez de 500. */
+    private semTabelaDoScan(error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const ausente = /esc_documento/i.test(msg) && /(does not exist|não existe|nao existe|42P01)/i.test(msg);
+        if (ausente) {
+            this.logger.warn(`esc_documento indisponível — documentos do scan não listados (${msg}).`);
+        }
+        return ausente;
+    }
+}

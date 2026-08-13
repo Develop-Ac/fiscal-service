@@ -7,6 +7,7 @@ import { IcmsModule } from './icms/icms.module';
 import { NfseModule } from './nfse/nfse.module';
 import { CteModule } from './cte/cte.module';
 import { SpedModule } from './sped/sped.module';
+import { EscanerModule } from './escaner/escaner.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { OpenQueryModule } from './shared/database/openquery/openquery.module';
 import { ErpApiModule } from './shared/erp-api/erp-api.module';
@@ -22,6 +23,7 @@ import { ErpApiModule } from './shared/erp-api/erp-api.module';
         NfseModule,
         CteModule,
         SpedModule,
+        EscanerModule,
 
         PrometheusModule.register({
             defaultMetrics: { enabled: true }, // CPU, memória, event loop, GC
