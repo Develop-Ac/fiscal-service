@@ -1,6 +1,6 @@
 import { StreamableFile } from '@nestjs/common';
 import { IcmsService } from './icms.service';
-import { Response } from 'express';
+import type { FastifyReply } from 'fastify';
 import { FiscalConferenceRequestDto } from './dto/fiscal-conference.dto';
 export declare class IcmsController {
     private readonly service;
@@ -115,7 +115,7 @@ export declare class IcmsController {
         ok: number;
         divergente: number;
     }>;
-    exportarXmlAuditoria(q: string | undefined, emitente: string | undefined, escopo: string | undefined, status: string | undefined, dtInicio: string | undefined, dtFim: string | undefined, res: Response): Promise<StreamableFile>;
+    exportarXmlAuditoria(q: string | undefined, emitente: string | undefined, escopo: string | undefined, status: string | undefined, dtInicio: string | undefined, dtFim: string | undefined, res: FastifyReply): Promise<StreamableFile>;
     getAuditoria(chaveNfe: string): Promise<{
         header: {
             status: any;
@@ -460,7 +460,7 @@ export declare class IcmsController {
         uploaded_at: any;
         updated_at: any;
     }>;
-    downloadGuiaByNfe(chaveNfe: string, res: Response): Promise<StreamableFile>;
+    downloadGuiaByNfe(chaveNfe: string, res: FastifyReply): Promise<StreamableFile>;
     getGuiasEscaneadas(chaveNfe: string): Promise<{
         count: number;
         guias: {
@@ -478,7 +478,7 @@ export declare class IcmsController {
             vinculo: "chave" | "numero_cnpj";
         }[];
     }>;
-    downloadGuiaEscaneada(id: string, res: Response): Promise<StreamableFile>;
+    downloadGuiaEscaneada(id: string, res: FastifyReply): Promise<StreamableFile>;
     private cabecalhoPdf;
     removeGuiaByNfe(chaveNfe: string): Promise<{
         success: boolean;
@@ -486,11 +486,11 @@ export declare class IcmsController {
     }>;
     generateDanfe(body: {
         xml: string;
-    }, res: Response): Promise<StreamableFile>;
+    }, res: FastifyReply): Promise<StreamableFile>;
     generateDanfeBatch(body: {
         invoices: {
             xml: string;
             chave: string;
         }[];
-    }, res: Response): Promise<StreamableFile>;
+    }, res: FastifyReply): Promise<StreamableFile>;
 }

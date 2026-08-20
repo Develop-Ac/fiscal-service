@@ -8,7 +8,7 @@ import {
     Res,
     StreamableFile,
 } from '@nestjs/common';
-import { Response } from 'express';
+import type { FastifyReply } from 'fastify';
 import archiver from 'archiver';
 import { EscanerService } from './escaner.service';
 
@@ -56,20 +56,20 @@ export class EscanerController {
     async download(
         @Param('id') id: string,
         @Query('inline') inline: string,
-        @Res({ passthrough: true }) res: Response,
+        @Res({ passthrough: true }) res: FastifyReply,
     ) {
         const payload = await this.service.downloadDocumento(Number(id));
         if (!payload) throw new NotFoundException(`Documento não encontrado: ${id}`);
 
         const disposition = inline === '1' ? 'inline' : 'attachment';
-        res.set(this.cabecalhoPdf(payload.fileName, disposition));
+        res.headers(this.cabecalhoPdf(payload.fileName, disposition));
         return new StreamableFile(payload.stream);
     }
 
     /** Zip com os PDFs do período (organizado por tipo/). */
     @Get('export')
     async export(
-        @Res() res: Response,
+        @Res() res: FastifyReply,
         @Query('from') from?: string,
         @Query('to') to?: string,
         @Query('tipo') tipo?: string,
@@ -81,18 +81,20 @@ export class EscanerController {
         if (entries.length === 0) throw new NotFoundException('Nenhum documento no período informado.');
 
         const stamp = [from, to].filter(Boolean).join('_a_') || 'todos';
-        res.setHeader('Content-Type', 'application/zip');
-        res.setHeader('Content-Disposition', `attachment; filename="movimento-fiscal_${stamp}.zip"`);
+        res.header('Content-Type', 'application/zip');
+        res.header('Content-Disposition', `attachment; filename="movimento-fiscal_${stamp}.zip"`);
 
         const archive = archiver('zip', { zlib: { level: 6 } });
         archive.on('error', () => {
             try {
-                res.status(500).end();
+                // O corpo já começou a ser enviado; só resta abortar a conexão.
+                res.raw.destroy();
             } catch {
                 /* stream já fechado */
             }
         });
-        archive.pipe(res);
+        // O Fastify faz o pipe do stream e mantém os headers dos hooks (CORS, helmet).
+        res.send(archive);
         for (const e of entries) {
             if (!e.key) continue;
             const stream = await this.service.getObjectStream(e.bucket, e.key);
@@ -107,7 +109,7 @@ export class EscanerController {
         const asciiFallback =
             utf8FileName
                 .normalize('NFD')
-                .replace(/[̀-ͯ]/g, '')
+                .replace(/[\u0300-\u036f]/g, '')
                 .replace(/[^a-zA-Z0-9_.-]/g, '_') || 'documento.pdf';
         return {
             'Content-Type': 'application/pdf',

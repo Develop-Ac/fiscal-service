@@ -1,11 +1,15 @@
 import { Logger, ValidationPipe, RequestMethod } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { NestExpressApplication } from '@nestjs/platform-express';
+import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import * as bodyParser from 'body-parser';
-import helmet from 'helmet';
+import fastifyHelmet from '@fastify/helmet';
+import fastifyMultipart from '@fastify/multipart';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import * as dotenv from 'dotenv';
 import { AppModule } from './app.module';
+
+/** Body/upload: 50 MB, o mesmo limite que o body-parser usava no Express. */
+const LIMITE_BODY = 50 * 1024 * 1024;
 
 // Permite serializar BigInt em respostas JSON (Postgres bigserial/bigint).
 (BigInt.prototype as any).toJSON = function () {
@@ -15,24 +19,37 @@ import { AppModule } from './app.module';
 async function bootstrap() {
     Logger.log('Starting bootstrap...', 'Bootstrap');
     try { dotenv.config(); } catch (_) { }
-    const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true });
-
-    app.use(
-        helmet({
-            contentSecurityPolicy: false,
-            crossOriginEmbedderPolicy: false,
-        }),
+    const app = await NestFactory.create<NestFastifyApplication>(
+        AppModule,
+        new FastifyAdapter({ bodyLimit: LIMITE_BODY }),
+        { bufferLogs: true },
     );
 
-    app.use(['/docs', '/docs-json'], (req, res, next) => {
-        const authHeader = req.headers.authorization;
+    await app.register(fastifyHelmet as any, {
+        contentSecurityPolicy: false,
+        crossOriginEmbedderPolicy: false,
+    });
+
+    // Upload de arquivos (equivalente ao multer). O limite por rota é ajustado
+    // no FileInterceptor de cada controller.
+    await app.register(fastifyMultipart as any, {
+        limits: { fileSize: LIMITE_BODY },
+    });
+
+    const fastify = app.getHttpAdapter().getInstance();
+
+    fastify.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
+        const url = request.url ?? '';
+        if (!url.startsWith('/docs') && !url.startsWith('/docs-json')) return;
+
+        const authHeader = request.headers.authorization;
 
         const user = 'admin';
         const password = 'Ac@2025acesso';
 
         if (!authHeader || !authHeader.startsWith('Basic ')) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Swagger"');
-        return res.status(401).send('Autenticação necessária');
+            reply.header('WWW-Authenticate', 'Basic realm="Swagger"');
+            return reply.status(401).send('Autenticação necessária');
         }
 
         const base64Credentials = authHeader.split(' ')[1];
@@ -41,15 +58,10 @@ async function bootstrap() {
         const [inputUser, inputPassword] = credentials.split(':');
 
         if (inputUser !== user || inputPassword !== password) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Swagger"');
-        return res.status(401).send('Usuário ou senha inválidos');
+            reply.header('WWW-Authenticate', 'Basic realm="Swagger"');
+            return reply.status(401).send('Usuário ou senha inválidos');
         }
-
-        next();
     });
-
-    app.use(bodyParser.json({ limit: '50mb' }));
-    app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 
     const normalizeOrigin = (value?: string | null) => {
         if (!value) return '';
@@ -99,12 +111,11 @@ async function bootstrap() {
     const document = SwaggerModule.createDocument(app, config);
     SwaggerModule.setup('api/docs', app, document);
 
-    const httpServer = app.getHttpAdapter().getInstance();
-    httpServer.get('/', (req, res) => {
+    fastify.get('/', (request: FastifyRequest, reply: FastifyReply) => {
         const requesterIp =
-            req.headers['x-forwarded-for'] ?? req.socket?.remoteAddress ?? req.connection?.remoteAddress ?? 'unknown';
+            request.headers['x-forwarded-for'] ?? request.socket?.remoteAddress ?? 'unknown';
         Logger.log(`Requisicao de status recebida de ${requesterIp}`, 'Bootstrap');
-        res.status(200).json({
+        reply.status(200).send({
             status: 'online',
             message: 'O servidor está online e funcional',
             docs: '/api/docs',

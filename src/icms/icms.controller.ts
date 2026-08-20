@@ -1,9 +1,9 @@
 import { BadRequestException, Body, Controller, Delete, Get, NotFoundException, Param, Post, Put, Query, StreamableFile, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { IcmsService } from './icms.service';
-import { Response } from 'express';
+import type { FastifyReply } from 'fastify';
 import { ApiTags } from '@nestjs/swagger';
 import { FiscalConferenceRequestDto } from './dto/fiscal-conference.dto';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { FileInterceptor } from '../shared/http/fastify-file.interceptor';
 @Controller('icms')
 export class IcmsController {
     constructor(private readonly service: IcmsService) { }
@@ -136,10 +136,10 @@ export class IcmsController {
         @Query('status') status: string | undefined,
         @Query('dtInicio') dtInicio: string | undefined,
         @Query('dtFim') dtFim: string | undefined,
-        @Res({ passthrough: true }) res: Response,
+        @Res({ passthrough: true }) res: FastifyReply,
     ) {
         const { buffer, count } = await this.service.exportarXmlAuditoria({ q, emitente, escopo, status, dtInicio, dtFim });
-        res.set({
+        res.headers({
             'Content-Type': 'application/zip',
             'Content-Disposition': 'attachment; filename="nfe-lancadas-xmls.zip"',
             'X-Total-Notas': String(count),
@@ -242,14 +242,14 @@ export class IcmsController {
     @Get('guia/:chaveNfe/download')
     async downloadGuiaByNfe(
         @Param('chaveNfe') chaveNfe: string,
-        @Res({ passthrough: true }) res: Response,
+        @Res({ passthrough: true }) res: FastifyReply,
     ) {
         const payload = await this.service.downloadGuiaByNfe(chaveNfe);
         if (!payload) {
             throw new NotFoundException(`Guia não encontrada para a NF: ${chaveNfe}`);
         }
 
-        res.set(this.cabecalhoPdf(payload.fileName));
+        res.headers(this.cabecalhoPdf(payload.fileName));
 
         return new StreamableFile(payload.stream);
     }
@@ -267,14 +267,14 @@ export class IcmsController {
     @Get('guia-escaneada/:id/download')
     async downloadGuiaEscaneada(
         @Param('id') id: string,
-        @Res({ passthrough: true }) res: Response,
+        @Res({ passthrough: true }) res: FastifyReply,
     ) {
         const payload = await this.service.downloadGuiaEscaneada(Number(id));
         if (!payload) {
             throw new NotFoundException(`Guia escaneada n\u00e3o encontrada: ${id}`);
         }
 
-        res.set(this.cabecalhoPdf(payload.fileName));
+        res.headers(this.cabecalhoPdf(payload.fileName));
 
         return new StreamableFile(payload.stream);
     }
@@ -303,9 +303,9 @@ export class IcmsController {
     }
 
     @Post('danfe')
-    async generateDanfe(@Body() body: { xml: string }, @Res({ passthrough: true }) res: Response) {
+    async generateDanfe(@Body() body: { xml: string }, @Res({ passthrough: true }) res: FastifyReply) {
         const buffer = await this.service.generateDanfe(body.xml);
-        res.set({
+        res.headers({
             'Content-Type': 'application/pdf',
             'Content-Disposition': 'inline; filename="danfe.pdf"',
         });
@@ -313,9 +313,9 @@ export class IcmsController {
     }
 
     @Post('danfe/batch')
-    async generateDanfeBatch(@Body() body: { invoices: { xml: string, chave: string }[] }, @Res({ passthrough: true }) res: Response) {
+    async generateDanfeBatch(@Body() body: { invoices: { xml: string, chave: string }[] }, @Res({ passthrough: true }) res: FastifyReply) {
         const buffer = await this.service.generateDanfeZip(body.invoices);
-        res.set({
+        res.headers({
             'Content-Type': 'application/zip',
             'Content-Disposition': 'attachment; filename="danfes.zip"',
         });

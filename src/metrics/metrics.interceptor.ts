@@ -4,6 +4,11 @@ import { InjectMetric } from '@willsoto/nestjs-prometheus';
 import { Histogram } from 'prom-client';
 import { Observable, tap } from 'rxjs';
 
+/** No Fastify o padrão da rota vem em `routeOptions.url` (não em `route.path`). */
+function rotaDe(req: any): string {
+  return req.routeOptions?.url ?? req.routerPath ?? req.route?.path ?? req.url;
+}
+
 @Injectable()
 export class MetricsInterceptor implements NestInterceptor {
   constructor(
@@ -21,12 +26,12 @@ export class MetricsInterceptor implements NestInterceptor {
           const res = context.switchToHttp().getResponse();
           end({
             method: req.method,
-            route: req.route?.path ?? req.url,
+            route: rotaDe(req),
             status_code: res.statusCode,
           });
         },
         error: () => {
-          end({ method: req.method, route: req.route?.path ?? req.url, status_code: 500 });
+          end({ method: req.method, route: rotaDe(req), status_code: 500 });
         },
       }),
     );

@@ -12,8 +12,8 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
-import { Response } from 'express';
+import { FileInterceptor } from '../shared/http/fastify-file.interceptor';
+import type { FastifyReply } from 'fastify';
 import { NfseDistService } from './nfse-dist.service';
 import { NfseCertService } from './nfse-cert.service';
 import { NfseAdnClient } from './nfse-adn.client';
@@ -66,7 +66,7 @@ export class NfseController {
     @Query('dataFim') dataFim: string | undefined,
     @Query('papel') papel: string | undefined,
     @Query('comRetFederal') comRetFederal: string | undefined,
-    @Res({ passthrough: true }) res: Response,
+    @Res({ passthrough: true }) res: FastifyReply,
   ) {
     const { buffer, count } = await this.service.exportarXml({
       numero,
@@ -77,7 +77,7 @@ export class NfseController {
       papel,
       comRetFederal,
     });
-    res.set({
+    res.headers({
       'Content-Type': 'application/zip',
       'Content-Disposition': 'attachment; filename="nfse-xmls.zip"',
       'X-Total-Notas': String(count),
@@ -98,11 +98,11 @@ export class NfseController {
   @Get('documentos/:chave/danfse')
   async danfse(
     @Param('chave') chave: string,
-    @Res({ passthrough: true }) res: Response,
+    @Res({ passthrough: true }) res: FastifyReply,
     @Query('fonte') fonte?: string,
   ) {
     const buffer = await this.service.danfse(chave, fonte === 'adn' ? 'adn' : 'local');
-    res.set({
+    res.headers({
       'Content-Type': 'application/pdf',
       'Content-Disposition': `inline; filename="danfse-${chave}.pdf"`,
     });

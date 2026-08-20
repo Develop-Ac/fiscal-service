@@ -38,11 +38,13 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const common_1 = require("@nestjs/common");
 const core_1 = require("@nestjs/core");
+const platform_fastify_1 = require("@nestjs/platform-fastify");
 const swagger_1 = require("@nestjs/swagger");
-const bodyParser = __importStar(require("body-parser"));
-const helmet_1 = __importDefault(require("helmet"));
+const helmet_1 = __importDefault(require("@fastify/helmet"));
+const multipart_1 = __importDefault(require("@fastify/multipart"));
 const dotenv = __importStar(require("dotenv"));
 const app_module_1 = require("./app.module");
+const LIMITE_BODY = 50 * 1024 * 1024;
 BigInt.prototype.toJSON = function () {
     return Number(this);
 };
@@ -53,30 +55,35 @@ async function bootstrap() {
         dotenv.config();
     }
     catch (_) { }
-    const app = await core_1.NestFactory.create(app_module_1.AppModule, { bufferLogs: true });
-    app.use((0, helmet_1.default)({
+    const app = await core_1.NestFactory.create(app_module_1.AppModule, new platform_fastify_1.FastifyAdapter({ bodyLimit: LIMITE_BODY }), { bufferLogs: true });
+    await app.register(helmet_1.default, {
         contentSecurityPolicy: false,
         crossOriginEmbedderPolicy: false,
-    }));
-    app.use(['/docs', '/docs-json'], (req, res, next) => {
-        const authHeader = req.headers.authorization;
+    });
+    await app.register(multipart_1.default, {
+        limits: { fileSize: LIMITE_BODY },
+    });
+    const fastify = app.getHttpAdapter().getInstance();
+    fastify.addHook('onRequest', async (request, reply) => {
+        var _a;
+        const url = (_a = request.url) !== null && _a !== void 0 ? _a : '';
+        if (!url.startsWith('/docs') && !url.startsWith('/docs-json'))
+            return;
+        const authHeader = request.headers.authorization;
         const user = 'admin';
         const password = 'Ac@2025acesso';
         if (!authHeader || !authHeader.startsWith('Basic ')) {
-            res.setHeader('WWW-Authenticate', 'Basic realm="Swagger"');
-            return res.status(401).send('Autenticação necessária');
+            reply.header('WWW-Authenticate', 'Basic realm="Swagger"');
+            return reply.status(401).send('Autenticação necessária');
         }
         const base64Credentials = authHeader.split(' ')[1];
         const credentials = Buffer.from(base64Credentials, 'base64').toString('utf8');
         const [inputUser, inputPassword] = credentials.split(':');
         if (inputUser !== user || inputPassword !== password) {
-            res.setHeader('WWW-Authenticate', 'Basic realm="Swagger"');
-            return res.status(401).send('Usuário ou senha inválidos');
+            reply.header('WWW-Authenticate', 'Basic realm="Swagger"');
+            return reply.status(401).send('Usuário ou senha inválidos');
         }
-        next();
     });
-    app.use(bodyParser.json({ limit: '50mb' }));
-    app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
     const normalizeOrigin = (value) => {
         if (!value)
             return '';
@@ -116,12 +123,11 @@ async function bootstrap() {
         .build();
     const document = swagger_1.SwaggerModule.createDocument(app, config);
     swagger_1.SwaggerModule.setup('api/docs', app, document);
-    const httpServer = app.getHttpAdapter().getInstance();
-    httpServer.get('/', (req, res) => {
-        var _a, _b, _c, _d, _e;
-        const requesterIp = (_e = (_c = (_a = req.headers['x-forwarded-for']) !== null && _a !== void 0 ? _a : (_b = req.socket) === null || _b === void 0 ? void 0 : _b.remoteAddress) !== null && _c !== void 0 ? _c : (_d = req.connection) === null || _d === void 0 ? void 0 : _d.remoteAddress) !== null && _e !== void 0 ? _e : 'unknown';
+    fastify.get('/', (request, reply) => {
+        var _a, _b, _c;
+        const requesterIp = (_c = (_a = request.headers['x-forwarded-for']) !== null && _a !== void 0 ? _a : (_b = request.socket) === null || _b === void 0 ? void 0 : _b.remoteAddress) !== null && _c !== void 0 ? _c : 'unknown';
         common_1.Logger.log(`Requisicao de status recebida de ${requesterIp}`, 'Bootstrap');
-        res.status(200).json({
+        reply.status(200).send({
             status: 'online',
             message: 'O servidor está online e funcional',
             docs: '/api/docs',

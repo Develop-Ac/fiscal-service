@@ -15,6 +15,7 @@ const icms_module_1 = require("./icms/icms.module");
 const nfse_module_1 = require("./nfse/nfse.module");
 const cte_module_1 = require("./cte/cte.module");
 const sped_module_1 = require("./sped/sped.module");
+const escaner_module_1 = require("./escaner/escaner.module");
 const prisma_module_1 = require("./prisma/prisma.module");
 const openquery_module_1 = require("./shared/database/openquery/openquery.module");
 const erp_api_module_1 = require("./shared/erp-api/erp-api.module");
@@ -33,6 +34,7 @@ exports.AppModule = AppModule = __decorate([
             nfse_module_1.NfseModule,
             cte_module_1.CteModule,
             sped_module_1.SpedModule,
+            escaner_module_1.EscanerModule,
             nestjs_prometheus_1.PrometheusModule.register({
                 defaultMetrics: { enabled: true },
             }),
