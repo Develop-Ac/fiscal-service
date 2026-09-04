@@ -15,7 +15,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.IcmsController = void 0;
 const common_1 = require("@nestjs/common");
 const icms_service_1 = require("./icms.service");
-const platform_express_1 = require("@nestjs/platform-express");
+const fastify_file_interceptor_1 = require("../shared/http/fastify-file.interceptor");
 let IcmsController = class IcmsController {
     constructor(service) {
         this.service = service;
@@ -90,7 +90,7 @@ let IcmsController = class IcmsController {
     }
     async exportarXmlAuditoria(q, emitente, escopo, status, dtInicio, dtFim, res) {
         const { buffer, count } = await this.service.exportarXmlAuditoria({ q, emitente, escopo, status, dtInicio, dtFim });
-        res.set({
+        res.headers({
             'Content-Type': 'application/zip',
             'Content-Disposition': 'attachment; filename="nfe-lancadas-xmls.zip"',
             'X-Total-Notas': String(count),
@@ -163,7 +163,7 @@ let IcmsController = class IcmsController {
         if (!payload) {
             throw new common_1.NotFoundException(`Guia não encontrada para a NF: ${chaveNfe}`);
         }
-        res.set(this.cabecalhoPdf(payload.fileName));
+        res.headers(this.cabecalhoPdf(payload.fileName));
         return new common_1.StreamableFile(payload.stream);
     }
     async getGuiasEscaneadas(chaveNfe) {
@@ -175,7 +175,7 @@ let IcmsController = class IcmsController {
         if (!payload) {
             throw new common_1.NotFoundException(`Guia escaneada n\u00e3o encontrada: ${id}`);
         }
-        res.set(this.cabecalhoPdf(payload.fileName));
+        res.headers(this.cabecalhoPdf(payload.fileName));
         return new common_1.StreamableFile(payload.stream);
     }
     cabecalhoPdf(fileName) {
@@ -198,7 +198,7 @@ let IcmsController = class IcmsController {
     }
     async generateDanfe(body, res) {
         const buffer = await this.service.generateDanfe(body.xml);
-        res.set({
+        res.headers({
             'Content-Type': 'application/pdf',
             'Content-Disposition': 'inline; filename="danfe.pdf"',
         });
@@ -206,7 +206,7 @@ let IcmsController = class IcmsController {
     }
     async generateDanfeBatch(body, res) {
         const buffer = await this.service.generateDanfeZip(body.invoices);
-        res.set({
+        res.headers({
             'Content-Type': 'application/zip',
             'Content-Disposition': 'attachment; filename="danfes.zip"',
         });
@@ -395,7 +395,7 @@ __decorate([
 ], IcmsController.prototype, "getPaymentStatusByKey", null);
 __decorate([
     (0, common_1.Post)('guia/:chaveNfe/upload'),
-    (0, common_1.UseInterceptors)((0, platform_express_1.FileInterceptor)('file')),
+    (0, common_1.UseInterceptors)((0, fastify_file_interceptor_1.FileInterceptor)('file')),
     __param(0, (0, common_1.Param)('chaveNfe')),
     __param(1, (0, common_1.UploadedFile)()),
     __metadata("design:type", Function),

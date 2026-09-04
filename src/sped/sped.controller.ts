@@ -10,8 +10,8 @@ import {
     UploadedFile,
     UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
-import { Response } from 'express';
+import { FileInterceptor } from '../shared/http/fastify-file.interceptor';
+import type { FastifyReply } from 'fastify';
 import * as fs from 'fs';
 import { SpedService, SpedOpcoes } from './sped.service';
 
@@ -76,9 +76,9 @@ export class SpedController {
     }
 
     @Get('jobs/:id/download')
-    baixar(@Param('id') id: string, @Res({ passthrough: true }) res: Response) {
+    baixar(@Param('id') id: string, @Res({ passthrough: true }) res: FastifyReply) {
         const { caminho, nome } = this.service.arquivoDoJob(id);
-        res.set({
+        res.headers({
             'Content-Type': 'application/zip',
             'Content-Disposition': `attachment; filename="${nome}"`,
             'Content-Length': String(fs.statSync(caminho).size),

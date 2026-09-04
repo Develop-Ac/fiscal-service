@@ -1,5 +1,5 @@
 import { Controller, Get, NotFoundException, Param, Post, Query, Res, StreamableFile, Body } from '@nestjs/common';
-import { Response } from 'express';
+import type { FastifyReply } from 'fastify';
 import { ApiTags } from '@nestjs/swagger';
 import { CteService } from './cte.service';
 import { CteRastreioService } from './cte-rastreio.service';
@@ -78,12 +78,12 @@ export class CteController {
 
   /** Gera o DACTE (PDF) do CT-e a partir da chave. */
   @Post('dacte')
-  async dacte(@Body() body: { chave?: string }, @Res({ passthrough: true }) res: Response) {
+  async dacte(@Body() body: { chave?: string }, @Res({ passthrough: true }) res: FastifyReply) {
     const chave = String(body?.chave || '').trim();
     if (!chave) throw new NotFoundException('Chave do CT-e não informada.');
     const buffer = await this.service.generateDacteByKey(chave);
     if (!buffer) throw new NotFoundException(`XML do CT-e não disponível para: ${chave}`);
-    res.set({
+    res.headers({
       'Content-Type': 'application/pdf',
       'Content-Disposition': 'inline; filename="dacte.pdf"',
     });
