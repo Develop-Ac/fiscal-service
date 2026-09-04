@@ -32,10 +32,20 @@ const TIPO_LABELS: Record<string, string> = {
     'recibo': 'Recibo',
     'cupom-fiscal': 'Cupom fiscal',
     'comprovante-outros': 'Comprovante/Outros',
+    'conta-consumo': 'Conta de consumo',
     'guia-icms-st': 'Guia ICMS-ST',
 };
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * A tabela esc_documento é compartilhada por dois apps de scan: o Movimento Fiscal
+ * (scanfiscal) e o SAC (scansac, tipos ni / ni-garantia / nota-devolucao...). O que
+ * separa os dois acervos é a coluna minio_bucket, gravada por linha. Esta tela é só
+ * do fiscal, então toda consulta restringe ao bucket fiscal — o nome segue o default
+ * do escaner-fiscal-app (MINIO_BUCKET de lá) e pode ser sobreposto por env.
+ */
+const BUCKET_FISCAL = (process.env.ESCANER_BUCKET_FISCAL || 'movimento-fiscal').trim();
 
 /**
  * Documentos do Movimento Fiscal (escaner-fiscal-app): leitura de esc_documento
@@ -58,6 +68,7 @@ export class EscanerService {
             where.push(sql.replace('?', `$${params.length}`));
         };
 
+        add('minio_bucket = ?', BUCKET_FISCAL);
         if (filters.from && ISO_DATE.test(filters.from)) add('data_documento >= ?::date', filters.from);
         if (filters.to && ISO_DATE.test(filters.to)) add('data_documento <= ?::date', filters.to);
         if (filters.tipo) add('tipo = ?', filters.tipo);
@@ -124,7 +135,8 @@ export class EscanerService {
     async listTipos() {
         try {
             const rows = await this.prisma.$queryRawUnsafe<{ tipo: string; total: bigint }[]>(
-                `SELECT tipo, COUNT(*)::bigint AS total FROM esc_documento GROUP BY tipo ORDER BY tipo`,
+                `SELECT tipo, COUNT(*)::bigint AS total FROM esc_documento WHERE minio_bucket = $1 GROUP BY tipo ORDER BY tipo`,
+                BUCKET_FISCAL,
             );
             return rows.map((r) => ({
                 tipo: r.tipo,
@@ -145,8 +157,9 @@ export class EscanerService {
         let rows: any[] = [];
         try {
             rows = await this.prisma.$queryRawUnsafe<any[]>(
-                `SELECT minio_bucket, minio_key, nome_arquivo FROM esc_documento WHERE id = $1`,
+                `SELECT minio_bucket, minio_key, nome_arquivo FROM esc_documento WHERE id = $1 AND minio_bucket = $2`,
                 idNum,
+                BUCKET_FISCAL,
             );
         } catch (error) {
             if (this.semTabelaDoScan(error)) return null;
@@ -170,6 +183,7 @@ export class EscanerService {
             params.push(value);
             where.push(sql.replace('?', `$${params.length}`));
         };
+        add('minio_bucket = ?', BUCKET_FISCAL);
         if (filters.from && ISO_DATE.test(filters.from)) add('data_documento >= ?::date', filters.from);
         if (filters.to && ISO_DATE.test(filters.to)) add('data_documento <= ?::date', filters.to);
         if (filters.tipo) add('tipo = ?', filters.tipo);
