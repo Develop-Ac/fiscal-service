@@ -98,7 +98,8 @@ export class EscanerController {
         for (const e of entries) {
             if (!e.key) continue;
             const stream = await this.service.getObjectStream(e.bucket, e.key);
-            archive.append(stream, { name: `${e.tipo}/${e.nomeArquivo}` });
+            // nome único dentro do zip (descrição + numeração) — ver nomesNoZip no service
+            archive.append(stream, { name: e.nomeNoZip });
         }
         await archive.finalize();
     }

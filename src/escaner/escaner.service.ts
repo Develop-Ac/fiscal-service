@@ -47,6 +47,77 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
  */
 const BUCKET_FISCAL = (process.env.ESCANER_BUCKET_FISCAL || 'movimento-fiscal').trim();
 
+/** Descrição vira sufixo do nome: sem acento, só [a-z0-9-], no máximo este tanto. */
+const DESCRICAO_MAX = 40;
+
+/** "Conta de luz — Energisa" -> "conta-de-luz-energisa" (cortado em DESCRICAO_MAX). */
+export function slugDescricao(descricao: string | null | undefined): string {
+    const s = String(descricao ?? '')
+        .normalize('NFD')
+        .replace(/[̀-ͯ]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+    if (s.length <= DESCRICAO_MAX) return s;
+    // corta no último hífen antes do limite (não deixa palavra pela metade, se der)
+    const cut = s.slice(0, DESCRICAO_MAX);
+    const h = cut.lastIndexOf('-');
+    return (h >= DESCRICAO_MAX / 2 ? cut.slice(0, h) : cut).replace(/-+$/, '');
+}
+
+export interface EntradaZip {
+    tipo: string;
+    nomeArquivo: string;
+    dataDocumento?: string | null;
+    descricao?: string | null;
+    nfNumero?: string | null;
+    fornecedorNome?: string | null;
+}
+
+/**
+ * Nome de cada PDF dentro do zip. O `nome_arquivo` gravado pelo app é só
+ * data + tipo (+ NF + nº de páginas), então documentos do mesmo dia e tipo saem
+ * com o MESMO nome e sobrescrevem um ao outro ao extrair. Regra:
+ *   - guia de ICMS-ST com nota: `guia-icms-st-<NF>-<fornecedor>_<data>[_Np]` — o
+ *     fiscal localiza a guia pela nota/fornecedor, não pela data;
+ *   - demais: `<nome_arquivo>[_<descricao-slug>]` (slug limitado a DESCRICAO_MAX);
+ *   - o que ainda colidir dentro da mesma pasta (tipo/) ganha `_01`, `_02`... —
+ *     na prática, os sem descrição do mesmo dia saem numerados.
+ * Devolve na mesma ordem das entradas.
+ */
+export function nomesNoZip(entries: EntradaZip[]): string[] {
+    const bases = entries.map((e) => {
+        const base = e.nomeArquivo.replace(/\.pdf$/i, '');
+        const slug = slugDescricao(e.descricao);
+        const nf = String(e.nfNumero ?? '').replace(/\D/g, '');
+        let nome: string;
+        if (e.tipo === 'guia-icms-st' && nf) {
+            const forn = slugDescricao(e.fornecedorNome);
+            const paginas = (base.match(/_(\d+p)$/) ?? [])[1];
+            nome =
+                `guia-icms-st-${nf}` +
+                (forn ? `-${forn}` : '') +
+                (e.dataDocumento ? `_${e.dataDocumento}` : '') +
+                (paginas ? `_${paginas}` : '') +
+                (slug ? `_${slug}` : '');
+        } else {
+            nome = slug ? `${base}_${slug}` : base;
+        }
+        return `${e.tipo}/${nome}`;
+    });
+    const total = new Map<string, number>();
+    for (const b of bases) total.set(b, (total.get(b) ?? 0) + 1);
+    const seq = new Map<string, number>();
+    return bases.map((b) => {
+        const n = total.get(b) ?? 1;
+        if (n === 1) return `${b}.pdf`;
+        const i = (seq.get(b) ?? 0) + 1;
+        seq.set(b, i);
+        const width = Math.max(2, String(n).length);
+        return `${b}_${String(i).padStart(width, '0')}.pdf`;
+    });
+}
+
 /**
  * Documentos do Movimento Fiscal (escaner-fiscal-app): leitura de esc_documento
  * + download/export dos PDFs no MinIO (bucket movimento-fiscal, gravado por linha).
@@ -193,21 +264,26 @@ export class EscanerService {
             const rows = await this.prisma.$queryRawUnsafe<any[]>(
                 `
                 SELECT id, tipo, to_char(data_documento, 'YYYY-MM-DD') AS data_documento,
-                       minio_bucket, minio_key, nome_arquivo
+                       minio_bucket, minio_key, nome_arquivo, descricao, nf_numero, fornecedor_nome
                 FROM esc_documento
                 ${whereSql}
                 ORDER BY data_documento, id
                 `,
                 ...params,
             );
-            return rows.map((r) => ({
+            const entries = rows.map((r) => ({
                 id: Number(r.id),
                 tipo: String(r.tipo ?? ''),
                 dataDocumento: String(r.data_documento ?? ''),
                 bucket: String(r.minio_bucket || this.minioBucket),
                 key: String(r.minio_key ?? ''),
                 nomeArquivo: String(r.nome_arquivo || `documento-${r.id}.pdf`),
+                descricao: r.descricao == null ? '' : String(r.descricao),
+                nfNumero: r.nf_numero == null ? '' : String(r.nf_numero),
+                fornecedorNome: r.fornecedor_nome == null ? '' : String(r.fornecedor_nome),
             }));
+            const nomes = nomesNoZip(entries);
+            return entries.map((e, i) => ({ ...e, nomeNoZip: nomes[i] }));
         } catch (error) {
             if (this.semTabelaDoScan(error)) return [];
             throw error;
