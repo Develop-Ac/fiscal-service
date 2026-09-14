@@ -35,6 +35,14 @@ Tempo estimado: 30 minutos. Nada disto muda o Teams de ninguém.
    O trecho entre `chat/` e `/0` é o **identificador do chat**. Trocando `%3A` por `:` e
    `%40` por `@`, fica assim: `19:abc123...@thread.v2`. Guarde-o; é o item 5 da lista final.
 
+4. Anote também **como o escritório participa do chat**: se as pessoas do escritório entram
+   com contas de outra empresa (aparecem como "Externo" ao lado do nome) ou se foram
+   convidadas como visitantes do nosso Microsoft 365. Isso muda como a intranet consegue
+   baixar o PDF que eles anexam, e o desenvolvimento precisa saber antes de testar.
+5. Em **Centro de administração do SharePoint → Políticas → Compartilhamento**, confira se o
+   nível permite links para **"Qualquer pessoa"**. É assim que o escritório externo abre o XML e
+   o DANFE anexados pela intranet. Se a política for mais restrita, avise o desenvolvimento.
+
 ## Etapa 3 — Registrar o aplicativo no Microsoft Entra
 
 1. Acesse **entra.microsoft.com** (antigo Azure AD) → Identidade → Aplicativos →
@@ -104,6 +112,7 @@ sessão for revogada no Entra, ou se a conta ficar 90 dias sem uso.
 | 4 | Data de expiração do segredo | Etapa 4, passo 1 |
 | 5 | Identificador do chat (`19:...@thread.v2`) | Etapa 2, passo 3 |
 | 6 | E-mail da conta de serviço | Etapa 1 |
+| 7 | Como o escritório participa do chat (externo ou visitante) e se links "Qualquer pessoa" são permitidos | Etapa 2, passos 4 e 5 |
 
 A senha da conta **não** precisa ser entregue: quem a tiver faz o login da Etapa 5.
 

@@ -143,9 +143,9 @@ tela faz hoje ("Guia Compl. (Padrão 50%)").
 
 Quem pode autorizar: qualquer membro do grupo; o número fica em `autorizado_por` para rastreio.
 
-### 2.4 Teams (escritório contábil)
+### 2.4 Teams (escritório contábil) — **implementado (Fase 3)**
 
-Sem integração hoje. Caminho mais curto: **Microsoft Graph com permissões delegadas de uma
+Não existia integração. Caminho mais curto: **Microsoft Graph com permissões delegadas de uma
 conta de serviço** (ex.: `fiscal@acacessorios.com.br`) que é membro do chat em grupo com o
 escritório. Evita as permissões de aplicativo `Chat.Read.All`, que são "API protegida" e exigem
 aprovação da Microsoft.
@@ -159,22 +159,26 @@ Pré-requisitos (fora do código, uma vez):
 2. Conta de serviço adicionada ao chat do escritório. Id do chat: `GET /me/chats` logado com
    ela (formato `19:...@thread.v2`).
 3. Login único: abrir `GET /api/teams/auth` na intranet com a conta de serviço; o callback
-   guarda o refresh token cifrado (reusar `nfse-crypto.util.ts`, AES-256-GCM) em
-   `com_teams_credencial`. Daí em diante só refresh.
+   (`teams.controller.ts`) guarda o refresh token cifrado com `nfse-crypto.util.ts` (AES-256-GCM,
+   chave `NFSE_CERT_SECRET`) em `com_teams_credencial`. Daí em diante só refresh (rotacionado a
+   cada uso). `GET /api/teams/status` mostra se está conectado.
 
-Cliente `src/shared/teams/teams-graph.client.ts` (fetch puro, sem SDK):
+Cliente `src/shared/teams/teams-graph.client.ts` (fetch puro, sem SDK) e cron
+`st-fluxo-teams.cron.ts` (2 min, `StFluxoService.processarTeams()`):
 
-- `enviarSolicitacao(chave)`: sobe XML + DANFE (gerado pelo `POST danfe` existente) para
-  `/me/drive/root:/GuiasST/<nf>/`, cria link de compartilhamento e posta a mensagem com os
-  anexos referenciados. Guarda `teams_msg_id`.
-- `lerRespostas()` (cron 2 min): `GET /chats/{id}/messages/delta` (guarda o `deltaLink`).
-  Mensagem de outro remetente com anexo `.pdf` e (a) `messageReference` para uma
-  `teams_msg_id` nossa, ou (b) texto com o nº da NF ou a chave → baixa via
-  `GET /shares/u!<base64url(contentUrl)>/driveItem/content` → `uploadGuiaByNfe(chave, pdf)`
-  → `GUIA_RECEBIDA` → WhatsApp msg D. Idempotência: `com_nfe_ajustado_processado` com id
-  `teams:<messageId>`.
-  PDF sem NF identificável → WhatsApp: "📎 O escritório mandou um PDF no Teams sem NF
-  identificada; anexe pela tela." (nunca adivinhar).
+- `solicitarNoTeams(f)` para cada NF `AUTORIZADA` sem `teams_msg_id`: sobe XML + DANFE (gerado
+  pelo `generateDanfe` existente) para `/me/drive/root:/GuiasST/NF-<nº>-<fim da chave>/`, cria
+  link de compartilhamento (`TEAMS_LINK_SCOPE`, default `anonymous` porque o escritório é externo;
+  se o tenant recusar, cai para `organization` e loga) e posta a mensagem com os anexos por
+  referência. Grava `teams_msg_id` → `SOLICITADA` → WhatsApp msg C.
+- `lerGuiasDoTeams()`: `GET /chats/{id}/messages?$top=50`. Mensagem de outra pessoa (compara
+  `from.user.id` com a conta de serviço), com anexo `.pdf`, criada depois da 1ª autorização
+  pendente, casa com uma NF `SOLICITADA` por: (a) `messageReference` ao nosso pedido, (b) a chave
+  no texto, (c) "NF 12345" no texto ou o nº no nome do arquivo. Baixa via
+  `GET /shares/u!<base64url(contentUrl)>/driveItem/content` → `uploadGuiaByNfe(chave, pdf)` →
+  `GUIA_RECEBIDA` → WhatsApp msg D. Idempotência: `com_nfe_ajustado_processado` com id
+  `teams:<messageId>`. PDF sem NF identificável → WhatsApp "📎 ... sem NF identificada; anexe pela
+  tela" (nunca adivinha). Download recusado → WhatsApp "⚠️ ... não consegui baixar; anexe pela tela".
 
 Mensagem no Teams:
 
@@ -216,11 +220,11 @@ CREATE TABLE IF NOT EXISTS com_nfe_st_fluxo (
 );
 CREATE INDEX IF NOT EXISTS ix_st_fluxo_estado ON com_nfe_st_fluxo (estado);
 
-CREATE TABLE IF NOT EXISTS com_teams_credencial (
-  id              smallint PRIMARY KEY DEFAULT 1,
-  conta           varchar(200) NOT NULL,
-  refresh_token   text NOT NULL,                    -- cifrado AES-256-GCM (TEAMS_SECRET)
-  delta_link      text,                             -- último deltaLink das mensagens do chat
+CREATE TABLE IF NOT EXISTS com_teams_credencial (           -- sql/2026-09-14_teams_credencial.sql
+  id              smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  conta           varchar(200) NOT NULL,            -- userPrincipalName da conta de serviço
+  usuario_id      varchar(64)  NOT NULL,            -- id no Graph (ignorar as próprias mensagens)
+  refresh_token   text NOT NULL,                    -- cifrado AES-256-GCM (NFSE_CERT_SECRET)
   updated_at      timestamptz NOT NULL DEFAULT now()
 );
 -- Idempotência de mensagens lidas (WhatsApp e Teams): reusa com_nfe_ajustado_processado;
@@ -236,7 +240,7 @@ Depois: `npx prisma db pull` + `npx prisma generate` (padrão DDL manual).
 | **0** | Registro no Entra ID, conta de serviço no chat, id do chat, textos combinados com a equipe | — | admin do M365 |
 | **1** ✅ | Cálculo automático + aviso A/B no WhatsApp; badge de estado na lista de NF-e | `src/icms/st-fluxo.service.ts`, `st-fluxo.cron.ts`, `sql/2026-09-14_st_fluxo.sql`, `getPaymentStatusMap()` (campo `fluxo`), `cotacao-frontend app/(private)/fiscal/nfe/page.tsx` | aplicar o SQL; `ST_FLUXO_ENABLED=true` |
 | **2** ✅ | Roteador de respostas (pode enviar / manual / classificação) | `st-fluxo.service.ts` (`processarRespostasWaha`), `auditoria-ajustado.cron.ts` (agora chama o roteador), `icms.service.ts` (`wahaLerMensagens`, `tratarRespostaAjustado`, `wahaEnviarTexto` com `chatId`) | Fase 1; `WAHA_GUIAS_CHAT_ID` |
-| **3** | Teams: solicitação com anexos + leitura da guia + anexo automático + msg D | `src/shared/teams/teams-graph.client.ts` (novo), `teams.controller.ts` (`GET /teams/auth`, `/callback`), cron 2 min, `st-fluxo.service.ts` | Fase 0 e 2 |
+| **3** ✅ | Teams: solicitação com anexos + leitura da guia + anexo automático + msg C/D | `src/shared/teams/` (`teams-graph.client.ts`, `teams.controller.ts`, `teams.module.ts`), `st-fluxo-teams.cron.ts`, `st-fluxo.service.ts` (`processarTeams`), `sql/2026-09-14_teams_credencial.sql` | Fase 0 (envs `TEAMS_*`) + login único |
 | **4** | Lembrete (msg F) e endpoints de intervenção: `GET /icms/st-fluxo`, `POST /icms/st-fluxo/:chave/manual`, `POST .../reenviar` | controller + tela | Fase 3 |
 
 Cada fase é útil sozinha: com a Fase 1 no ar a equipe já para de clicar em Calcular; com a
@@ -256,7 +260,8 @@ TEAMS_CLIENT_ID=
 TEAMS_CLIENT_SECRET=
 TEAMS_REDIRECT_URI=
 TEAMS_CHAT_ID=                   # 19:...@thread.v2
-TEAMS_SECRET=                    # chave AES p/ cifrar o refresh token
+TEAMS_LINK_SCOPE=anonymous       # link dos anexos: anonymous (escritório externo) | organization
+# o refresh token é cifrado com NFSE_CERT_SECRET (já existe)
 TEAMS_CRON=*/2 * * * *
 TEAMS_CRON_DISABLED=false
 ```
@@ -273,8 +278,15 @@ TEAMS_CRON_DISABLED=false
 - **NCM repetido**: a mesma pergunta voltará para o mesmo NCM em outra NF. Quando incomodar,
   gravar as classificações respondidas em `com_ncm_classificacao` (NCM → revenda/consumo/ref)
   e consultá-la antes de perguntar (Fase 2b, 30 linhas).
-- **Anexo no chat em grupo do Teams** fica no OneDrive de quem mandou; a conta de serviço lê
-  porque é membro do chat. Só chat em grupo é suportado; canal de equipe usa outra rota do
-  Graph e fica de fora até que seja necessário.
+- **Anexo no chat em grupo do Teams** fica no OneDrive de quem mandou. Se o escritório está em
+  **outro tenant** (chat federado), o download pela API de shares com o token da nossa conta pode
+  ser recusado (401/403). O código já trata: avisa no WhatsApp que a guia chegou mas não baixou, e
+  a pessoa anexa pela tela. Testar com um PDF real na Fase 3 antes de contar com o automático;
+  se falhar, o plano B é o escritório subir o PDF numa pasta compartilhada da nossa conta
+  (link de edição) em vez de anexar no chat. Só chat em grupo é suportado; canal de equipe usa
+  outra rota do Graph e fica de fora até que seja necessário.
+- **Links `anonymous`** exigem que o tenant permita compartilhamento com "qualquer pessoa"
+  (SharePoint admin → Sharing). Se for bloqueado, o fallback `organization` só abre para contas
+  do nosso tenant: o escritório externo não veria XML/DANFE (a mensagem chega mesmo assim).
 - **Nunca gravar antes do fato**: WhatsApp e Teams só marcam "enviado" com resposta 2xx;
   falha volta no próximo ciclo (mesma regra do alerta de MVA).

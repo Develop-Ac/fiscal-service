@@ -1040,7 +1040,7 @@ export class IcmsService {
     }
 
     // --- XML UTILS ---
-    private async decodeXml(content: string): Promise<string> {
+    async decodeXml(content: string): Promise<string> {
         if (!content) return "";
         content = content.trim();
         if (content.startsWith('<')) return content;
