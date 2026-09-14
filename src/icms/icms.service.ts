@@ -2012,7 +2012,7 @@ export class IcmsService {
         );
     }
 
-    private async findSupplierByCpfCnpj(cpfCnpj: string) {
+    async findSupplierByCpfCnpj(cpfCnpj: string) {
         const normalized = this.cleanDigits(cpfCnpj);
         if (!normalized) return null;
 
@@ -2033,7 +2033,7 @@ export class IcmsService {
         return rows[0] ?? null;
     }
 
-    private async findSupplierProductLink(
+    async findSupplierProductLink(
         forCodigo: string,
         codProdFornecedor: string,
         descProdFornecedor?: string,
@@ -2148,7 +2148,7 @@ export class IcmsService {
      * via linked server CONSULTA — sem esperar o ETL (~1 min) — e usa o Stage só
      * como fallback.
      */
-    private async findInternalProduct(proCodigo: string, direto = false) {
+    async findInternalProduct(proCodigo: string, direto = false) {
         if (direto) {
             return (await this.findInternalProductErp(proCodigo)) ?? (await this.findInternalProductStage(proCodigo));
         }
@@ -2481,7 +2481,7 @@ export class IcmsService {
     // AUDITORIA FISCAL DO LANÇAMENTO (gatilho: NF vira LANCADA)
     // =====================================================================
 
-    private digitsOnly(v: any): string {
+    digitsOnly(v: any): string {
         return String(v ?? '').replace(/\D/g, '');
     }
 
@@ -3352,19 +3352,24 @@ export class IcmsService {
         return blocos.join('\n\n');
     }
 
-    private async wahaEnviarTexto(text: string, replyTo?: string): Promise<void> {
+    async wahaEnviarTexto(text: string, replyTo?: string): Promise<string | null> {
         const base = process.env.WAHA_BASE_URL;
         const key = process.env.WAHA_API_KEY;
         const session = process.env.WAHA_SESSION || 'default';
         const group = process.env.WAHA_GROUP_CHAT_ID;
-        if (!base || !key || !group) return;
+        if (!base || !key || !group) return null;
         const body: any = { session, chatId: group, text };
         if (replyTo) body.reply_to = replyTo;
-        await fetch(`${base.replace(/\/$/, '')}/api/sendText`, {
+        const resp = await fetch(`${base.replace(/\/$/, '')}/api/sendText`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Api-Key': key },
             body: JSON.stringify(body),
         });
+        if (!resp.ok) return null;
+        // Id da mensagem enviada (o fluxo ST guarda para casar a resposta citada).
+        const json: any = await resp.json().catch(() => null);
+        const id = json?.id?._serialized ?? json?.id ?? json?.key?.id;
+        return id ? String(id) : 'ok';
     }
 
     /**
@@ -3489,7 +3494,7 @@ export class IcmsService {
         '31': 'MG', '32': 'ES', '33': 'RJ', '35': 'SP', '41': 'PR', '42': 'SC', '43': 'RS',
         '50': 'MS', '51': 'MT', '52': 'GO', '53': 'DF',
     };
-    private cufToSigla(cuf: string): string {
+    cufToSigla(cuf: string): string {
         return IcmsService.CUF_SIGLA[String(cuf ?? '')] ?? String(cuf ?? '');
     }
 
@@ -3944,6 +3949,7 @@ export class IcmsService {
             guiaGerada?: boolean,
             guiaPath?: string,
             status_conferencia_produtos?: 'OK' | 'ERRO' | 'SEM_RELACIONAMENTO' | 'PENDENTE',
+            fluxo?: string,
         }> = {};
         for (const item of all) {
             map[item.chave_nfe] = {
@@ -3987,6 +3993,14 @@ export class IcmsService {
                 guiaPath: map[chave]?.guiaPath,
                 status_conferencia_produtos: statusConferencia,
             };
+        }
+
+        // Estado do fluxo automático (docs/automacao-icms-st.md); tabela pode não existir ainda.
+        const fluxos = await this.prisma.$queryRawUnsafe<any[]>(`SELECT chave_nfe, estado FROM com_nfe_st_fluxo`).catch(() => []);
+        for (const f of fluxos) {
+            const chave = String(f.chave_nfe || '');
+            if (!chave) continue;
+            map[chave] = { ...(map[chave] ?? { status: '', valor: 0 }), fluxo: String(f.estado) };
         }
 
         return map;
