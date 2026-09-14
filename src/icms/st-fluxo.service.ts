@@ -232,27 +232,47 @@ export class StFluxoService {
         const brl = (v: any) => Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
 
         if (f.estado === 'NCM_PENDENTE') {
-            const linhas = (f.itens_pendentes || [])
-                .map((p: any) => `• item ${p.nItem} — ${p.cProd} ${p.xProd} (NCM ${p.ncm}) — ${p.motivo}`)
-                .join('\n');
+            const itens: any[] = f.itens_pendentes || [];
+            const linhas = itens.map((p: any) => `• item ${p.nItem} — ${p.xProd} (cód. ${p.cProd})`).join('\n');
+            const ex = itens[0]?.nItem ?? 1;
             return (
-                `❓ *Imposto a definir* — NF *${numero}* · ${emitente} (${uf})\n` +
-                `Preciso saber o imposto de cada item para calcular:\n${linhas}\n\n` +
-                `↩️ Responda citando esta mensagem, um item por linha:\n` +
-                `3 st · 7 difal · 9 tributada · ou: todos st\n` +
+                `❓ *Preciso de uma resposta* — NF *${numero}* · ${emitente} (${uf})\n` +
+                `Não consegui definir o imposto de ${itens.length} item(ns). Me diga o que é cada um:\n${linhas}\n\n` +
+                `Responda a esta mensagem, um item por linha:\n` +
+                `*${ex} st* = revenda com ICMS-ST · *${ex} difal* = uso e consumo · *${ex} tributada* = sem ST\n` +
+                `ou *todos st* para todos iguais.\n` +
+                `Assim que responder, eu calculo e aviso se tem guia.\n` +
                 `\`${f.chave_nfe}\``
             );
         }
-        const tipos = String(f.tipo_guia || 'ICMS_ST');
+        const tipo = String(f.tipo_guia || 'ICMS_ST');
+        const rotuloTipo = tipo === 'DIFAL' ? 'DIFAL' : tipo.includes('DIFAL') ? 'ICMS complementar (ST + DIFAL)' : 'ICMS complementar';
+        const apuracao = [
+            Number(f.valor_excedente) > 0 ? `• Em alguns itens o fornecedor destacou ST a mais: R$ ${brl(f.valor_excedente)} (não gera guia)` : '',
+            Number(f.itens_padrao) > 0 ? `• ${f.itens_padrao} item(ns) calculado(s) com o MVA padrão, por não estar(em) na tabela` : '',
+        ].filter(Boolean).join('\n');
         return (
-            `🧾 *${tipos.replace('_', '-').replace('/', ' + ')} calculado* — NF *${numero}*\n` +
-            `Fornecedor: ${emitente} (${uf})\n` +
-            `A recolher: *R$ ${brl(f.valor_guia)}*\n` +
-            (Number(f.valor_excedente) > 0 ? `Excedente: ST destacada acima da calculada em R$ ${brl(f.valor_excedente)} (sem guia)\n` : '') +
-            (Number(f.itens_padrao) > 0 ? `${f.itens_padrao} item(ns) com MVA padrão 50,39% (NCM fora da tabela)\n` : '') +
-            `\n📨 *Tem guia para pedir ao escritório.* Depois de mandar, responda a esta mensagem com *enviado dd/mm* (vencimento) para registrar, ou *manual* para tratar na tela.\n` +
+            `🧾 *Existe guia a recolher* — NF *${numero}* · ${emitente} (${uf})\n` +
+            `*${rotuloTipo}: R$ ${brl(f.valor_guia)}*\n\n` +
+            `📨 *O que fazer:* pedir a guia ao escritório.\n` +
+            `Depois de pedir, responda a esta mensagem com *enviado 25/09* (data do vencimento).\n` +
+            `Se preferir tratar pela tela, responda *manual*.\n` +
+            (apuracao ? `\nDetalhes da apuração:\n${apuracao}\n` : '') +
             `\`${f.chave_nfe}\``
         );
+    }
+
+    /** Estado do fluxo em linguagem da equipe (respostas no grupo). */
+    private rotulo(estado: string): string {
+        return ({
+            NCM_PENDENTE: 'aguardando a classificação dos itens',
+            SEM_GUIA: 'calculada, sem guia a recolher',
+            AGUARDANDO_ENVIO: 'com guia a pedir ao escritório',
+            ENVIADA_ESCRITORIO: 'guia já pedida ao escritório, aguardando o PDF',
+            GUIA_RECEBIDA: 'guia recebida e anexada',
+            MANUAL: 'fora do automático, tratada pela tela',
+            ERRO: 'com erro no cálculo automático',
+        } as Record<string, string>)[estado] ?? estado;
     }
 
     /**
@@ -294,8 +314,10 @@ export class StFluxoService {
         const numero = this.numeroNf(f.chave_nfe);
         const brl = Number(f.valor_guia || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
         return f.estado === 'ENVIADA_ESCRITORIO'
-            ? `⏳ Guia da NF *${numero}* (R$ ${brl}) pedida ao escritório há ${dias} dias e ainda sem PDF anexado.\n\`${f.chave_nfe}\``
-            : `⏳ NF *${numero}* com guia de R$ ${brl} a pedir ao escritório há ${dias} dias, sem registro de envio.\n\`${f.chave_nfe}\``;
+            ? `⏳ *Guia pendente há ${dias} dias* — NF *${numero}* · R$ ${brl}\n` +
+              `A guia foi pedida ao escritório e o PDF ainda não foi anexado. Quando chegar, anexe pela tela ou pelo scanner.\n\`${f.chave_nfe}\``
+            : `⏳ *Guia pendente há ${dias} dias* — NF *${numero}* · R$ ${brl}\n` +
+              `Ainda não há registro do pedido ao escritório. Peça a guia e responda *enviado dd/mm* na mensagem da NF.\n\`${f.chave_nfe}\``;
     }
 
     /**
@@ -404,7 +426,7 @@ export class StFluxoService {
                 const citada = String(m?.replyTo?.body ?? m?._data?.quotedMsg?.body ?? '');
                 const chave = `${citada}\n${body}`.match(/(\d{44})/)?.[1] ?? null;
                 if (!chave) {
-                    await this.responder('❓ Não consegui identificar a NF. *Responda à mensagem da NF* (citando).', msgId, chatId);
+                    await this.responder('❓ Não sei de qual NF você fala. Responda *citando a mensagem da NF*.', msgId, chatId);
                     await this.icms.marcarAjustadoProcessado(msgId, null, 'SEM_CHAVE');
                     continue;
                 }
@@ -417,7 +439,7 @@ export class StFluxoService {
                 const [f] = await this.prisma.$queryRawUnsafe<any[]>(`SELECT * FROM com_nfe_st_fluxo WHERE chave_nfe = $1`, chave);
                 const numero = chave.substring(25, 34).replace(/^0+/, '');
                 if (!f) {
-                    await this.responder(`ℹ️ NF *${numero}* não está no fluxo automático de ICMS-ST.`, msgId, chatId);
+                    await this.responder(`ℹ️ NF *${numero}* não está no automático de ICMS-ST.`, msgId, chatId);
                     await this.icms.marcarAjustadoProcessado(msgId, chave, 'FORA_DO_FLUXO');
                     continue;
                 }
@@ -438,35 +460,35 @@ export class StFluxoService {
 
         if (cmd === 'MANUAL') {
             await this.gravar(f.chave_nfe, { estado: 'MANUAL', autorizado_por: quem, autorizado_em: new Date() });
-            await this.responder(`👍 NF *${numero}* saiu do fluxo automático; tratar na tela.`, msgId, chatId);
+            await this.responder(`👍 NF *${numero}* saiu do automático. Trate pela tela.`, msgId, chatId);
             return 'MANUAL';
         }
 
         if (cmd === 'ENVIADO') {
             if (estado !== 'AGUARDANDO_ENVIO') {
-                await this.responder(`ℹ️ NF *${numero}* está em *${estado}*; nada a registrar.`, msgId, chatId);
+                await this.responder(`ℹ️ NF *${numero}* já está ${this.rotulo(estado)}. Nada a registrar.`, msgId, chatId);
                 return 'ESTADO_INVALIDO';
             }
             const venc = parseVencimento(body);
             if (!venc) {
-                await this.responder('❓ Qual o vencimento? Ex.: *enviado 25/09*', msgId, chatId);
+                await this.responder('❓ Qual o vencimento da guia? Responda, por exemplo: *enviado 25/09*', msgId, chatId);
                 return 'SEM_VENCIMENTO';
             }
             await this.gravar(f.chave_nfe, { estado: 'ENVIADA_ESCRITORIO', vencimento: venc, autorizado_por: quem, autorizado_em: new Date() });
             const [a, mes, d] = venc.split('-');
-            await this.responder(`✅ NF *${numero}* registrada como enviada ao escritório, vencimento ${d}/${mes}/${a}. Quando a guia chegar, anexe pela tela ou pelo scanner.`, msgId, chatId);
+            await this.responder(`✅ Anotado: guia da NF *${numero}* pedida ao escritório, vencimento ${d}/${mes}/${a}. Quando o PDF chegar, anexe pela tela ou pelo scanner.`, msgId, chatId);
             return 'ENVIADA';
         }
 
         // CLASSIFICAR
         if (estado !== 'NCM_PENDENTE') {
-            await this.responder(`ℹ️ NF *${numero}* está em *${estado}*; não há item para classificar.`, msgId, chatId);
+            await this.responder(`ℹ️ NF *${numero}* já está ${this.rotulo(estado)}. Não há item para classificar.`, msgId, chatId);
             return 'ESTADO_INVALIDO';
         }
         const pendentes: number[] = (f.itens_pendentes || []).map((p: any) => Number(p.nItem));
         const novas = parseClassificacao(body, pendentes);
         if (!Object.keys(novas).length) {
-            await this.responder(`❓ Não entendi. Itens pendentes: ${pendentes.join(', ')}. Responda um por linha, ex.: *${pendentes[0]} st* (st, difal ou tributada), ou *todos st*.`, msgId, chatId);
+            await this.responder(`❓ Não entendi. Faltam os itens ${pendentes.join(', ')}. Responda um por linha, por exemplo *${pendentes[0]} st*, *${pendentes[0]} difal* ou *${pendentes[0]} tributada*, ou *todos st*.`, msgId, chatId);
             return 'CLASSIFICACAO_INVALIDA';
         }
         // calcular() repergunta só o que faltar, ou avisa o resultado (waha_msg_aviso volta a null).

@@ -82,30 +82,46 @@ a NF na resposta citada. Aviso que falhou (WAHA fora) é reenviado no ciclo segu
 
 **A) Tem guia** (estado `AGUARDANDO_ENVIO`):
 
-```
-🧾 *ICMS-ST calculado* — NF *12345*
-Fornecedor: NOME DO FORNECEDOR (SP)
-A recolher: *R$ 1.234,56*
-Excedente: ST destacada acima da calculada em R$ 80,10 (sem guia)
-2 item(ns) com MVA padrão 50,39% (NCM fora da tabela)
+Regra dos textos (pedido da equipe em 14/09): primeiro o que importa e o que fazer, depois os
+detalhes; pouco jargão. Os textos vivem em `montarAviso()` / `montarLembrete()` e as respostas
+curtas em `rotear()`; `POST /icms/st-fluxo/exemplo` manda todos com dados fictícios.
 
-📨 *Tem guia para pedir ao escritório.* Depois de mandar, responda a esta mensagem com
-*enviado dd/mm* (vencimento) para registrar, ou *manual* para tratar na tela.
+```
+🧾 *Existe guia a recolher* — NF *12345* · NOME DO FORNECEDOR (SP)
+*ICMS complementar: R$ 1.234,56*          ← "DIFAL" ou "ICMS complementar (ST + DIFAL)" conforme o caso
+
+📨 *O que fazer:* pedir a guia ao escritório.
+Depois de pedir, responda a esta mensagem com *enviado 25/09* (data do vencimento).
+Se preferir tratar pela tela, responda *manual*.
+
+Detalhes da apuração:                      ← só aparece quando há algo
+• Em alguns itens o fornecedor destacou ST a mais: R$ 80,10 (não gera guia)
+• 2 item(ns) calculado(s) com o MVA padrão, por não estar(em) na tabela
 `51260912345678000199550010000123451000123456`
 ```
 
-**B) Imposto a definir** (estado `NCM_PENDENTE`):
+**B) Preciso de uma resposta** (estado `NCM_PENDENTE`):
 
 ```
-❓ *Imposto a definir* — NF *12345* · NOME DO FORNECEDOR (SP)
-Preciso saber o imposto de cada item para calcular:
-• item 3 — ABC123 PARAFUSO SEXTAVADO M8 (NCM 7318.15.00) — sem vínculo no cadastro
-• item 7 — XYZ9 ÓLEO LUBRIFICANTE 1L (NCM 2710.19.32) — revenda, NCM fora da tabela de ST
+❓ *Preciso de uma resposta* — NF *12345* · NOME DO FORNECEDOR (SP)
+Não consegui definir o imposto de 2 item(ns). Me diga o que é cada um:
+• item 3 — PARAFUSO SEXTAVADO M8 (cód. ABC123)
+• item 7 — ÓLEO LUBRIFICANTE 1L (cód. XYZ9)
 
-↩️ Responda citando esta mensagem, um item por linha:
-3 st   ·   7 difal   ·   9 tributada   ·   ou: todos st
+Responda a esta mensagem, um item por linha:
+*3 st* = revenda com ICMS-ST · *3 difal* = uso e consumo · *3 tributada* = sem ST
+ou *todos st* para todos iguais.
+Assim que responder, eu calculo e aviso se tem guia.
 `5126...`
 ```
+
+**F) Lembrete** (a cada `ST_FLUXO_LEMBRETE_DIAS`, citando o aviso original):
+
+```
+⏳ *Guia pendente há 3 dias* — NF *12345* · R$ 1.234,56
+A guia foi pedida ao escritório e o PDF ainda não foi anexado. Quando chegar, anexe pela tela ou pelo scanner.
+```
+(ou, sem registro de envio: "Ainda não há registro do pedido ao escritório. Peça a guia e responda *enviado dd/mm* na mensagem da NF.")
 
 **Sem guia**: não avisa (fica na tela como "Sem Guia - Verificado"). **Guia anexada**: não
 avisa; a tela mostra "Guia recebida".
