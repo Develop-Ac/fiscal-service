@@ -3,23 +3,24 @@
  * Funções puras, sem Nest: `node scripts/check-st-fluxo-parse.mjs` exercita todas.
  */
 export type Classificacao = 'ST' | 'DIFAL' | 'TRIBUTADA';
-export type Comando = 'AJUSTADO' | 'AUTORIZAR' | 'MANUAL' | 'CLASSIFICAR';
+export type Comando = 'AJUSTADO' | 'ENVIADO' | 'MANUAL' | 'CLASSIFICAR';
 
 const RE_AJUSTADO = /ajustad[oa]/i;
-const RE_AUTORIZAR = /pode\s+enviar/i;
+// "enviado 25/09" registra o envio manual ao escritório; "pode enviar" aceito por hábito
+const RE_ENVIADO = /\benviad[oa]\b|pode\s+enviar/i;
 const RE_MANUAL = /^\s*manual\b/i;
 // "3 st", "7: difal", "9 - tributada", "todos st"; separadas por linha, ";" ou ","
 const RE_CLASSIF = /(^|[\n;,·])\s*(\d+|todos)\s*[:\-–]?\s*(st|revenda|difal|consumo|uso|tributad\w*)\b/gi;
 
 export function comando(body: string): Comando | null {
     if (RE_AJUSTADO.test(body)) return 'AJUSTADO';
-    if (RE_AUTORIZAR.test(body)) return 'AUTORIZAR';
+    if (RE_ENVIADO.test(body)) return 'ENVIADO';
     if (RE_MANUAL.test(body)) return 'MANUAL';
     RE_CLASSIF.lastIndex = 0;
     return RE_CLASSIF.test(body) ? 'CLASSIFICAR' : null;
 }
 
-/** "pode enviar 25/09" → "2026-09-25"; ano ausente = `anoBase`; "25/09/26" aceito. */
+/** "enviado 25/09" → "2026-09-25"; ano ausente = `anoBase`; "25/09/26" aceito. */
 export function parseVencimento(body: string, anoBase = new Date().getFullYear()): string | null {
     const m = body.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
     if (!m) return null;

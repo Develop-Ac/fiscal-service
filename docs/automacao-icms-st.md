@@ -1,65 +1,58 @@
-# Automação do ICMS-ST de entrada: cálculo → WhatsApp → Teams → guia anexada
+# Automação do ICMS-ST/DIFAL de entrada: cálculo → aviso no WhatsApp → guia anexada
 
-Plano de implementação (set/2026). Objetivo: a NF de compra cair, o serviço calcular o
-ICMS-ST sozinho, avisar no grupo "Conferência Fiscal" do WhatsApp, receber a autorização
-(e o vencimento) por resposta na própria conversa, pedir a guia ao escritório contábil pelo
-Teams, e, quando o escritório responder com o PDF, anexar a guia à nota na intranet e avisar
-no WhatsApp. Quando algum NCM não está na tabela de MVA, a classificação é pedida no
-WhatsApp e o cálculo só roda depois que todos os itens foram respondidos.
+Estado em 14/09/2026: **Fases 1 e 2 implementadas, não deployadas.** Objetivo: a NF de compra
+cair, o serviço calcular o ICMS-ST/DIFAL sozinho e avisar no grupo de guias do WhatsApp que há
+guia a pedir ao escritório. O pedido ao escritório e o anexo da guia continuam **manuais**; o
+fluxo percebe sozinho quando a guia foi anexada. Quando algum item não tem imposto decidido, a
+classificação é pedida no WhatsApp e o cálculo só roda depois que todos foram respondidos.
 
-**Decisões fechadas em 14/09/2026:**
+**Decisões fechadas:**
 
 - DIFAL (item de uso e consumo) entra no mesmo fluxo; a guia pode ser ICMS-ST, DIFAL ou as duas.
 - O SUBTIPO do cadastro do produto vale mais que a tabela de NCM. **NCM na tabela sozinho não
   decide**: sem o cadastro dizer revenda, uma pessoa escolhe entre ST, DIFAL e tributada.
-- Qualquer membro do grupo do WhatsApp pode autorizar o envio ao escritório.
-- No Teams a conversa com o escritório é um **chat em grupo** (não canal de equipe).
+- Qualquer membro do grupo do WhatsApp pode responder.
 - O fluxo das guias usa um **grupo de WhatsApp próprio** (`WAHA_GUIAS_CHAT_ID`), separado do grupo
   "Conferência Fiscal" da auditoria (`WAHA_GROUP_CHAT_ID`). O "ajustado" continua no grupo antigo.
+- **Sem integração com o Teams.** As contas da AC e do escritório são pessoais (Teams gratuito),
+  que não tem API. O pedido ao escritório é feito à mão no grupo do Teams; o serviço só avisa.
 
-## 1. Como funciona hoje (o que o plano reaproveita)
+## 1. Como funciona hoje (o que o fluxo reaproveita)
 
 | Passo | Onde está | Observação |
 |---|---|---|
-| NF chega do ERP | `icms-sync.cron` (1 min) → `syncInvoices()` lê `NFE_DISTRIBUICAO` e grava `com_nfe_conciliacao` com o XML | Quando o XML **completo** chega, já existe o gancho `maybeAlertMva()` (alerta de MVA > 50,39%). O cálculo automático entra **no mesmo ponto**. |
+| NF chega do ERP | `icms-sync.cron` (1 min) → `syncInvoices()` lê `NFE_DISTRIBUICAO` e grava `com_nfe_conciliacao` com o XML | Quando o XML **completo** chega, `maybeAlertMva()` preenche `mva_verificado_em` — é o sinal que o fluxo usa. |
 | Usuário clica **Calcular** | `POST /icms/calculate` → `calculateStForInvoice(xml)` | Por item: `findMvaInRef(NCM)` na tabela embutida (`constants/mva-data.ts`), match exato → raiz 6 → raiz 4. Não achou → MVA padrão 50,39% e `matchType = 'Não Encontrado'`. Calcula ST por item, compara com o destacado, tolerância `GUIA_TOLERANCIA_BRL` (R$ 10). DIFAL pelo regime do fornecedor (ReceitaWS + CRT). |
-| Usuário marca revenda / uso-consumo / tributada e salva | tela `StCalculationResults.tsx` → `POST /icms/payment-status` → `savePaymentStatus()` | Grava `com_pagamento_guia` (valor, `observacoes` = "Tem Guia Complementar" / "Sem Guia - Verificado"), `tipo_imposto` ("ICMS ST", "DIFAL", "Tributada"), itens em `com_nfe_conciliacao_item` e roda a conferência fiscal. |
-| Guia em PDF | `POST /icms/guia/:chave/upload` → `uploadGuiaByNfe()` → MinIO `documentos/notas/<chave>/` + `com_nfe_guia_pdf` | Aparece no card "Guia da NF". A guia escaneada pelo app vem por outro caminho (`esc_documento`). |
-| WhatsApp de saída | `wahaEnviarTexto()` direto no WAHA (respostas) e n8n → WAHA (alertas) | Grupo `WAHA_GROUP_CHAT_ID`. |
-| WhatsApp de entrada | `auditoria-ajustado.cron` (1 min) → `processarRespostasAjustadoWaha()` | **Polling** (a nuvem não alcança a intranet). Acha a chave de 44 dígitos na mensagem citada, idempotência em `com_nfe_ajustado_processado`. Só entende "ajustado". |
-| Teams | — | **Não existe integração nenhuma.** |
+| Usuário marca revenda / uso-consumo / tributada e salva | tela `StCalculationResults.tsx` → `POST /icms/payment-status` → `savePaymentStatus()` | Grava `com_pagamento_guia` (valor, `observacoes` = "Tem Guia Complementar" / "Sem Guia - Verificado"), `tipo_imposto`, itens em `com_nfe_conciliacao_item` e roda a conferência fiscal. |
+| Guia em PDF | `POST /icms/guia/:chave/upload` → MinIO + `com_nfe_guia_pdf`; ou scanner → `esc_documento` (`tipo = 'guia-icms-st'`, `chave_nfe`) | Aparece no card "Guia da NF". |
+| WhatsApp | `wahaEnviarTexto()` (envio) e `wahaLerMensagens()` (polling; a nuvem não alcança a intranet) | Idempotência por id da mensagem em `com_nfe_ajustado_processado`. |
 
-Conclusão: o cálculo, a persistência, a guia e a leitura/escrita no WhatsApp já existem.
-O que falta é (a) disparar sozinho, (b) um roteador de respostas por estado, (c) o Teams.
-
-## 2. Fluxo proposto
+## 2. Fluxo
 
 ```mermaid
 stateDiagram-v2
-    [*] --> XML_COMPLETO : sync do ERP
-    XML_COMPLETO --> FORA_DO_FLUXO : dentro de MT, saída, ou CFOP sem tributação
-    XML_COMPLETO --> NCM_PENDENTE : algum item sem NCM na tabela e sem cadastro que decida
+    [*] --> XML_COMPLETO : sync do ERP (mva_verificado_em)
+    XML_COMPLETO --> FORA_DO_FLUXO : dentro de MT, saída, ou já calculada na tela (MANUAL)
+    XML_COMPLETO --> NCM_PENDENTE : algum item sem imposto decidido (pergunta no grupo)
     XML_COMPLETO --> CALCULADA : todos os itens decididos
-    NCM_PENDENTE --> NCM_PENDENTE : resposta parcial (reperguntar só o que falta)
+    NCM_PENDENTE --> NCM_PENDENTE : resposta parcial (repergunta só o que falta)
     NCM_PENDENTE --> CALCULADA : todos classificados
-    CALCULADA --> SEM_GUIA : valor a recolher <= tolerância
-    CALCULADA --> AGUARDANDO_AUTORIZACAO : valor a recolher > tolerância (avisa no WhatsApp)
-    AGUARDANDO_AUTORIZACAO --> AUTORIZADA : "pode enviar dd/mm" (vencimento gravado)
-    AUTORIZADA --> SOLICITADA : postada no chat do Teams (Fase 3)
-    AGUARDANDO_AUTORIZACAO --> MANUAL : "manual"
-    SOLICITADA --> GUIA_RECEBIDA : escritório responde com PDF → anexa → avisa
-    SOLICITADA --> SOLICITADA : lembrete se passar N dias sem guia
+    CALCULADA --> SEM_GUIA : valor a recolher ≤ R$ 0,05 (sem aviso)
+    CALCULADA --> AGUARDANDO_ENVIO : tem guia → aviso "tem guia para pedir"
+    AGUARDANDO_ENVIO --> ENVIADA_ESCRITORIO : "enviado dd/mm" (registro opcional do envio manual)
+    AGUARDANDO_ENVIO --> MANUAL : "manual"
+    AGUARDANDO_ENVIO --> GUIA_RECEBIDA : guia anexada pela tela/scanner
+    ENVIADA_ESCRITORIO --> GUIA_RECEBIDA : guia anexada pela tela/scanner
 ```
 
-### 2.1 Chegada da NF (automático) — **implementado (Fase 1)**
+### 2.1 Chegada da NF (Fase 1)
 
 `st-fluxo.cron.ts` (1 min, só com `ST_FLUXO_ENABLED=true`) → `StFluxoService.processarCiclo()`.
-Em vez de gancho dentro do `syncInvoices()`, é um **poller** na `com_nfe_conciliacao`: NF de
-**entrada** (`tipo_operacao = 0`), de **fora de MT** (chave não começa com 51; dentro de MT o
-ST já vem retido pelo fornecedor e não há guia), emitida nos últimos `ST_FLUXO_JANELA_DIAS`
-(7), com `mva_verificado_em` preenchido (é o sinal de que o XML **completo** já foi lido pelo
-`maybeAlertMva`) e **sem** linha em `com_nfe_st_fluxo`. NF que já tem `com_pagamento_guia`
-(alguém calculou na tela) entra como `MANUAL`, sem aviso.
+Poller na `com_nfe_conciliacao`: NF de **entrada** (`tipo_operacao = 0`), de **fora de MT** (chave
+não começa com 51; dentro de MT o ST já vem retido pelo fornecedor), emitida nos últimos
+`ST_FLUXO_JANELA_DIAS` (7), com `mva_verificado_em` preenchido e **sem** linha em
+`com_nfe_st_fluxo`. NF que já tem `com_pagamento_guia` (alguém calculou na tela) entra como
+`MANUAL`, sem aviso.
 
 Decisão do imposto por item, nesta ordem (para na primeira regra que responde):
 
@@ -72,31 +65,32 @@ Decisão do imposto por item, nesta ordem (para na primeira regra que responde):
    de ST" ou os dois.
 
 Com todos decididos, roda `calculateStForInvoice(xml)` e grava pelo **mesmo**
-`savePaymentStatus()` que a tela usa (`usuario: 'Automático'`), com `itens[]` montados como a
-tela monta. Assim a NF aparece na tela `/fiscal/nfe` exatamente como se alguém tivesse
-calculado: "Tem Guia Complementar", `tipo_imposto`, itens da conferência.
+`savePaymentStatus()` da tela (`usuario: 'Automático'`). A NF aparece em `/fiscal/nfe` como se
+alguém tivesse calculado, mais o badge do estado do fluxo (campo `fluxo` do
+`GET /icms/payment-status`).
 
-Valor da guia = soma de `diferenca` dos itens ST (positiva) + `vlDifal` dos itens DIFAL, como
-hoje. `valorPagoAMais` (ST destacada acima da calculada) entra na mensagem como **excedente**,
-sem guia.
+Valor da guia = ST líquida dos itens ST + `vlDifal` dos itens DIFAL, a mesma conta da tela;
+"tem guia" quando passa de R$ 0,05 (regra da tela). `valorPagoAMais` entra na mensagem como
+**excedente**, sem guia. Item ST com NCM fora da tabela usa o **MVA padrão 50,39%** e a mensagem
+diz quantos foram.
 
-### 2.2 Mensagens no WhatsApp (grupo das guias, `WAHA_GUIAS_CHAT_ID`)
+### 2.2 Mensagens no WhatsApp (grupo das guias)
 
 Todas terminam com a chave de 44 dígitos em `` `código` `` — é assim que o roteador reconhece
-a NF na resposta citada (padrão já usado pelo "ajustado").
+a NF na resposta citada. Aviso que falhou (WAHA fora) é reenviado no ciclo seguinte
+(`waha_msg_aviso` nulo).
 
-**A) Tem guia** (estado `AGUARDANDO_AUTORIZACAO`):
+**A) Tem guia** (estado `AGUARDANDO_ENVIO`):
 
 ```
 🧾 *ICMS-ST calculado* — NF *12345*
 Fornecedor: NOME DO FORNECEDOR (SP)
-Itens: 14 · ST a recolher: *R$ 1.234,56*
-(DIFAL uso/consumo: R$ 0,00)
+A recolher: *R$ 1.234,56*
 Excedente: ST destacada acima da calculada em R$ 80,10 (sem guia)
-2 itens usaram o MVA padrão 50,39% (NCM fora da tabela)
+2 item(ns) com MVA padrão 50,39% (NCM fora da tabela)
 
-↩️ Responda a esta mensagem com *pode enviar 25/09* para pedir a guia ao escritório,
-ou *manual* para tratar na tela.
+📨 *Tem guia para pedir ao escritório.* Depois de mandar, responda a esta mensagem com
+*enviado dd/mm* (vencimento) para registrar, ou *manual* para tratar na tela.
 `51260912345678000199550010000123451000123456`
 ```
 
@@ -113,180 +107,80 @@ Preciso saber o imposto de cada item para calcular:
 `5126...`
 ```
 
-**C) Solicitada**: `📨 Guia da NF *12345* solicitada ao escritório (venc. 25/09).`
-**D) Recebida**: `✅ Guia da NF *12345* recebida do escritório e anexada à nota na intranet.`
-**E) Sem guia**: não avisa (fica registrado na tela como "Sem Guia - Verificado").
-**F) Lembrete**: `⏳ Guia da NF *12345* pedida há 3 dias e ainda sem retorno do escritório.`
+**Sem guia**: não avisa (fica na tela como "Sem Guia - Verificado"). **Guia anexada**: não
+avisa; a tela mostra "Guia recebida".
 
-### 2.3 Respostas aceitas (roteador) — **implementado (Fase 2)**
+### 2.3 Respostas aceitas (Fase 2)
 
-`StFluxoService.processarRespostasWaha()` (chamado pelo cron `auditoria-ajustado.cron.ts`, 1 min):
-lê o grupo da auditoria (só "ajustado") e o grupo das guias (os demais comandos); se as duas envs
-apontam para o mesmo grupo, lê uma vez com todos. Para cada mensagem não tratada acha a chave na
-mensagem citada, busca o estado em `com_nfe_st_fluxo` e roteia. Idempotência por id da mensagem
-em `com_nfe_ajustado_processado` (resultados novos: AUTORIZADA, MANUAL, CLASSIFICADA,
-CLASSIFICACAO_INVALIDA, ESTADO_INVALIDO, SEM_VENCIMENTO, FORA_DO_FLUXO). Mensagem sem comando
-conhecido é ignorada sem tocar no banco.
+`StFluxoService.processarRespostasWaha()` (cron `auditoria-ajustado.cron.ts`, 1 min) lê o grupo
+da auditoria (só "ajustado") e o grupo das guias (os demais comandos); se as duas envs apontam
+para o mesmo grupo, lê uma vez com todos. Mensagem sem comando conhecido é ignorada sem tocar
+no banco. Parsers puros em `st-fluxo.parse.ts`; checagem: `node scripts/check-st-fluxo-parse.mjs`.
 
-| Estado da NF | Resposta | Regex | Efeito |
-|---|---|---|---|
-| qualquer | `ajustado` | (existente) | reconferência da auditoria (inalterado) |
-| `AGUARDANDO_AUTORIZACAO` | `pode enviar 25/09` ou `pode enviar 25/09/2026` | `/pode\s+enviar.*?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/i` | grava vencimento + quem autorizou → estado `AUTORIZADA` → responde "✅ autorizada, vou pedir a guia"; a Fase 3 posta no Teams e passa a `SOLICITADA` (msg C) |
-| `AGUARDANDO_AUTORIZACAO` | `pode enviar` sem data | | responde "qual o vencimento? ex.: pode enviar 25/09" |
-| `AGUARDANDO_AUTORIZACAO` | `manual` | | `MANUAL`, some do fluxo |
-| `NCM_PENDENTE` | linhas `3 st`, `7 difal`, `9 tributada`, `todos st` (sinônimos: revenda = st, consumo/uso = difal) | `/^\s*(\d+|todos)\s*[:\-–]?\s*(st|revenda|difal|consumo|uso|tributad\w*)/im` por linha | grava `classificacao` por item e chama `StFluxoService.calcular(chave, classificacao)` (já pronto); repergunta só o que falta |
-| `NCM_PENDENTE` | `3 st ref 45` | idem + `ref (\d+)` | usa a linha 45 da tabela de MVA em vez do padrão 50,39% (ainda não previsto no cálculo) |
-| outro | qualquer | | responde "esta NF está em <estado>; nada a fazer" |
+| Estado da NF | Resposta (citando a mensagem da NF) | Efeito |
+|---|---|---|
+| qualquer | `ajustado` | reconferência da auditoria fiscal (`IcmsService.tratarRespostaAjustado`, inalterado) |
+| `AGUARDANDO_ENVIO` | `enviado 25/09` (ou `pode enviar 25/09`) | grava vencimento e quem respondeu → `ENVIADA_ESCRITORIO` → "✅ registrada como enviada" |
+| `AGUARDANDO_ENVIO` | `enviado` sem data | "❓ qual o vencimento?" |
+| `AGUARDANDO_ENVIO` | `manual` | `MANUAL`, sai do fluxo |
+| `NCM_PENDENTE` | linhas `3 st`, `7 difal`, `9 tributada`, `todos st` (sinônimos: revenda = st, consumo/uso = difal) | grava a classificação e chama `calcular()`; repergunta só o que falta ou manda a msg A |
+| outro | qualquer dos acima | "ℹ️ NF está em <estado>; nada a fazer" |
 
-Item classificado como revenda com NCM ausente da tabela usa o **MVA padrão 50,39%**, como a
-tela faz hoje ("Guia Compl. (Padrão 50%)").
+### 2.4 Guia anexada (fecha o fluxo)
 
-Quem pode autorizar: qualquer membro do grupo; o número fica em `autorizado_por` para rastreio.
+`detectarGuiasAnexadas()` a cada ciclo: NF em `AGUARDANDO_ENVIO` ou `ENVIADA_ESCRITORIO` com
+linha em `com_nfe_guia_pdf` (upload pela tela) ou `esc_documento` com `tipo = 'guia-icms-st'` e a
+mesma `chave_nfe` (scanner) → `GUIA_RECEBIDA`, sem aviso.
 
-### 2.4 Teams (escritório contábil) — **implementado (Fase 3)**
+## 3. Dados (DDL manual: `sql/2026-09-14_st_fluxo.sql`)
 
-Não existia integração. Caminho mais curto: **Microsoft Graph com permissões delegadas de uma
-conta de serviço** (ex.: `fiscal@acacessorios.com.br`) que é membro do chat em grupo com o
-escritório. Evita as permissões de aplicativo `Chat.Read.All`, que são "API protegida" e exigem
-aprovação da Microsoft.
-
-Pré-requisitos (fora do código, uma vez):
-
-1. Registro de aplicativo no Entra ID (Azure AD) do tenant da AC: tipo "Web", redirect
-   `https://fiscal-service.acacessorios.local/api/teams/auth/callback` (ou `http://localhost:3001/...`).
-   Permissões delegadas: `Chat.ReadWrite`, `Files.ReadWrite`, `Files.Read.All`, `offline_access`, `User.Read`.
-   Consentimento do administrador do M365.
-2. Conta de serviço adicionada ao chat do escritório. Id do chat: `GET /me/chats` logado com
-   ela (formato `19:...@thread.v2`).
-3. Login único: abrir `GET /api/teams/auth` na intranet com a conta de serviço; o callback
-   (`teams.controller.ts`) guarda o refresh token cifrado com `nfse-crypto.util.ts` (AES-256-GCM,
-   chave `NFSE_CERT_SECRET`) em `com_teams_credencial`. Daí em diante só refresh (rotacionado a
-   cada uso). `GET /api/teams/status` mostra se está conectado.
-
-Cliente `src/shared/teams/teams-graph.client.ts` (fetch puro, sem SDK) e cron
-`st-fluxo-teams.cron.ts` (2 min, `StFluxoService.processarTeams()`):
-
-- `solicitarNoTeams(f)` para cada NF `AUTORIZADA` sem `teams_msg_id`: sobe XML + DANFE (gerado
-  pelo `generateDanfe` existente) para `/me/drive/root:/GuiasST/NF-<nº>-<fim da chave>/`, cria
-  link de compartilhamento (`TEAMS_LINK_SCOPE`, default `anonymous` porque o escritório é externo;
-  se o tenant recusar, cai para `organization` e loga) e posta a mensagem com os anexos por
-  referência. Grava `teams_msg_id` → `SOLICITADA` → WhatsApp msg C.
-- `lerGuiasDoTeams()`: `GET /chats/{id}/messages?$top=50`. Mensagem de outra pessoa (compara
-  `from.user.id` com a conta de serviço), com anexo `.pdf`, criada depois da 1ª autorização
-  pendente, casa com uma NF `SOLICITADA` por: (a) `messageReference` ao nosso pedido, (b) a chave
-  no texto, (c) "NF 12345" no texto ou o nº no nome do arquivo. Baixa via
-  `GET /shares/u!<base64url(contentUrl)>/driveItem/content` → `uploadGuiaByNfe(chave, pdf)` →
-  `GUIA_RECEBIDA` → WhatsApp msg D. Idempotência: `com_nfe_ajustado_processado` com id
-  `teams:<messageId>`. PDF sem NF identificável → WhatsApp "📎 ... sem NF identificada; anexe pela
-  tela" (nunca adivinha). Download recusado → WhatsApp "⚠️ ... não consegui baixar; anexe pela tela".
-
-Mensagem no Teams:
-
-```
-Solicitação de guia de ICMS-ST — NF 12345
-Fornecedor: NOME DO FORNECEDOR — CNPJ 00.000.000/0001-00
-Chave: 5126...
-Valor a recolher: R$ 1.234,56 — Vencimento: 25/09/2026
-Anexos: XML da NF-e e DANFE.
-Por favor, responder a esta mensagem com a guia em PDF.
-```
-
-Se o tenant não liberar o Graph, o plano B é o mesmo fluxo por e-mail (email-service já
-existe; leitura da resposta por IMAP), sem mudar nada do lado do WhatsApp.
-
-## 3. Dados (DDL manual, `sql/0xx_st_fluxo.sql`)
-
-```sql
-CREATE TABLE IF NOT EXISTS com_nfe_st_fluxo (
-  chave_nfe          varchar(44) PRIMARY KEY REFERENCES com_nfe_conciliacao(chave_nfe),
-  estado             varchar(30) NOT NULL,          -- NCM_PENDENTE | SEM_GUIA | AGUARDANDO_AUTORIZACAO | AUTORIZADA | SOLICITADA | GUIA_RECEBIDA | MANUAL | ERRO
-  tipo_guia          varchar(20),                   -- ICMS_ST | DIFAL | ICMS_ST/DIFAL
-  valor_guia         numeric(14,2),
-  valor_excedente    numeric(14,2),
-  itens_padrao       integer,                       -- itens ST calculados com o MVA padrão 50,39%
-  itens_pendentes    jsonb,                         -- [{nItem, cProd, xProd, ncm, motivo}]
-  classificacao      jsonb,                         -- {"3":"ST","7":"DIFAL","9":"TRIBUTADA"}
-  vencimento         date,
-  autorizado_por     varchar(30),                   -- número do WhatsApp
-  autorizado_em      timestamptz,
-  waha_msg_aviso     varchar(120),                  -- id da última mensagem nossa (aviso/pergunta)
-  teams_msg_id       varchar(120),
-  teams_guia_msg_id  varchar(120),
-  guia_recebida_em   timestamptz,
-  lembrete_em        timestamptz,
-  erro               text,
-  created_at         timestamptz NOT NULL DEFAULT now(),
-  updated_at         timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS ix_st_fluxo_estado ON com_nfe_st_fluxo (estado);
-
-CREATE TABLE IF NOT EXISTS com_teams_credencial (           -- sql/2026-09-14_teams_credencial.sql
-  id              smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-  conta           varchar(200) NOT NULL,            -- userPrincipalName da conta de serviço
-  usuario_id      varchar(64)  NOT NULL,            -- id no Graph (ignorar as próprias mensagens)
-  refresh_token   text NOT NULL,                    -- cifrado AES-256-GCM (NFSE_CERT_SECRET)
-  updated_at      timestamptz NOT NULL DEFAULT now()
-);
--- Idempotência de mensagens lidas (WhatsApp e Teams): reusa com_nfe_ajustado_processado;
--- mensagens do Teams entram com waha_msg_id = 'teams:<messageId>'.
-```
-
-Depois: `npx prisma db pull` + `npx prisma generate` (padrão DDL manual).
+`com_nfe_st_fluxo`: uma linha por NF — `estado`, `tipo_guia`, `valor_guia`, `valor_excedente`,
+`itens_padrao`, `itens_pendentes` (jsonb), `classificacao` (jsonb), `vencimento`,
+`autorizado_por`/`autorizado_em` (quem registrou o envio), `waha_msg_aviso`, `guia_recebida_em`,
+`lembrete_em`, `erro`. Idempotência das respostas reusa `com_nfe_ajustado_processado` (resultados
+novos: ENVIADA, MANUAL, CLASSIFICADA, CLASSIFICACAO_INVALIDA, ESTADO_INVALIDO, SEM_VENCIMENTO,
+FORA_DO_FLUXO). Não há modelo Prisma: tudo por `$queryRawUnsafe`, não precisa de `prisma generate`.
 
 ## 4. Fases
 
-| Fase | Entrega | Arquivos | Depende de |
+| Fase | Entrega | Arquivos | Estado |
 |---|---|---|---|
-| **0** | Registro no Entra ID, conta de serviço no chat, id do chat, textos combinados com a equipe | — | admin do M365 |
-| **1** ✅ | Cálculo automático + aviso A/B no WhatsApp; badge de estado na lista de NF-e | `src/icms/st-fluxo.service.ts`, `st-fluxo.cron.ts`, `sql/2026-09-14_st_fluxo.sql`, `getPaymentStatusMap()` (campo `fluxo`), `cotacao-frontend app/(private)/fiscal/nfe/page.tsx` | aplicar o SQL; `ST_FLUXO_ENABLED=true` |
-| **2** ✅ | Roteador de respostas (pode enviar / manual / classificação) | `st-fluxo.service.ts` (`processarRespostasWaha`), `auditoria-ajustado.cron.ts` (agora chama o roteador), `icms.service.ts` (`wahaLerMensagens`, `tratarRespostaAjustado`, `wahaEnviarTexto` com `chatId`) | Fase 1; `WAHA_GUIAS_CHAT_ID` |
-| **3** ✅ | Teams: solicitação com anexos + leitura da guia + anexo automático + msg C/D | `src/shared/teams/` (`teams-graph.client.ts`, `teams.controller.ts`, `teams.module.ts`), `st-fluxo-teams.cron.ts`, `st-fluxo.service.ts` (`processarTeams`), `sql/2026-09-14_teams_credencial.sql` | Fase 0 (envs `TEAMS_*`) + login único |
-| **4** | Lembrete (msg F) e endpoints de intervenção: `GET /icms/st-fluxo`, `POST /icms/st-fluxo/:chave/manual`, `POST .../reenviar` | controller + tela | Fase 3 |
+| 1 | Cálculo automático + avisos A/B + badge na lista de NF-e | `src/icms/st-fluxo.service.ts`, `st-fluxo.cron.ts`, `sql/2026-09-14_st_fluxo.sql`, `getPaymentStatusMap()` (campo `fluxo`), `cotacao-frontend app/(private)/fiscal/nfe/page.tsx` | ✅ codada |
+| 2 | Roteador de respostas (enviado / manual / classificação) + detecção da guia anexada | `st-fluxo.parse.ts`, `st-fluxo.service.ts`, `auditoria-ajustado.cron.ts` (chama o roteador), `icms.service.ts` (`wahaLerMensagens`, `tratarRespostaAjustado`, `wahaEnviarTexto` com `chatId`), `scripts/check-st-fluxo-parse.mjs` | ✅ codada |
+| 3 | Lembrete "guia pedida há N dias sem retorno" (`lembrete_em`) e endpoints de intervenção (`GET /icms/st-fluxo`, `POST .../manual`, `POST .../reenviar`) | controller + tela | pendente, não bloqueia |
 
-Cada fase é útil sozinha: com a Fase 1 no ar a equipe já para de clicar em Calcular; com a
-2, autoriza pelo celular; com a 3, a guia chega sem ninguém baixar/anexar.
-
-## 5. Variáveis de ambiente novas
+## 5. Variáveis de ambiente
 
 ```
-ST_FLUXO_ENABLED=true            # liga o cálculo automático (opt-in: fala com pessoas)
-ST_FLUXO_DRY_RUN=1               # 1 = monta a mensagem e só loga (primeiro teste)
+ST_FLUXO_ENABLED=true            # liga o fluxo (opt-in: fala com pessoas)
+ST_FLUXO_DRY_RUN=1               # 1 = monta as mensagens e só loga (primeiro teste)
 ST_FLUXO_JANELA_DIAS=7           # só NFs emitidas nos últimos N dias (evita spam no 1º deploy)
 ST_FLUXO_CRON=* * * * *
 WAHA_GUIAS_CHAT_ID=              # grupo das guias (120363...@g.us); sem ele cai no WAHA_GROUP_CHAT_ID
-ST_FLUXO_LEMBRETE_DIAS=3
-TEAMS_TENANT_ID=
-TEAMS_CLIENT_ID=
-TEAMS_CLIENT_SECRET=
-TEAMS_REDIRECT_URI=
-TEAMS_CHAT_ID=                   # 19:...@thread.v2
-TEAMS_LINK_SCOPE=anonymous       # link dos anexos: anonymous (escritório externo) | organization
-# o refresh token é cifrado com NFSE_CERT_SECRET (já existe)
-TEAMS_CRON=*/2 * * * *
-TEAMS_CRON_DISABLED=false
 ```
 
-## 6. Riscos e armadilhas conhecidas
+Já existentes e reusadas: `WAHA_BASE_URL`, `WAHA_API_KEY`, `WAHA_SESSION`, `WAHA_GROUP_CHAT_ID`,
+`WAHA_AJUSTADO_*`, `GUIA_TOLERANCIA_BRL`.
 
-- **Leitura do WAHA depende do engine WEBJS saudável**: já aconteceu "envia mas não lê"
-  (HTTP 500 em `chats/*/messages`); a solução foi subir a imagem. O fluxo de resposta herda
-  esse risco; o de aviso (saída) não.
-- **ReceitaWS** tem teto ~3 req/min no plano gratuito. Um lote de NFs no mesmo minuto cai no
-  fallback pelo CRT do XML (comportamento já previsto). Aceitável.
-- **MVA padrão 50,39%** para NCM fora da tabela é uma estimativa; a mensagem A diz quantos
-  itens usaram o padrão, para a pessoa decidir se autoriza.
-- **NCM repetido**: a mesma pergunta voltará para o mesmo NCM em outra NF. Quando incomodar,
-  gravar as classificações respondidas em `com_ncm_classificacao` (NCM → revenda/consumo/ref)
-  e consultá-la antes de perguntar (Fase 2b, 30 linhas).
-- **Anexo no chat em grupo do Teams** fica no OneDrive de quem mandou. Se o escritório está em
-  **outro tenant** (chat federado), o download pela API de shares com o token da nossa conta pode
-  ser recusado (401/403). O código já trata: avisa no WhatsApp que a guia chegou mas não baixou, e
-  a pessoa anexa pela tela. Testar com um PDF real na Fase 3 antes de contar com o automático;
-  se falhar, o plano B é o escritório subir o PDF numa pasta compartilhada da nossa conta
-  (link de edição) em vez de anexar no chat. Só chat em grupo é suportado; canal de equipe usa
-  outra rota do Graph e fica de fora até que seja necessário.
-- **Links `anonymous`** exigem que o tenant permita compartilhamento com "qualquer pessoa"
-  (SharePoint admin → Sharing). Se for bloqueado, o fallback `organization` só abre para contas
-  do nosso tenant: o escritório externo não veria XML/DANFE (a mensagem chega mesmo assim).
-- **Nunca gravar antes do fato**: WhatsApp e Teams só marcam "enviado" com resposta 2xx;
-  falha volta no próximo ciclo (mesma regra do alerta de MVA).
+## 6. Subir
+
+1. Aplicar `sql/2026-09-14_st_fluxo.sql` no Postgres da intranet.
+2. `ST_FLUXO_ENABLED=true`, `WAHA_GUIAS_CHAT_ID=<grupo>`, `ST_FLUXO_DRY_RUN=1`; deploy do
+   fiscal-service e do cotacao-frontend.
+3. Conferir no log as mensagens montadas (`DRY-RUN WhatsApp: ...`) e o número de quem respondeu
+   (campo `participant` do WAHA; se vier vazio, trocar o campo em `lerGrupo`).
+4. Tirar o `ST_FLUXO_DRY_RUN`.
+
+## 7. Riscos e armadilhas
+
+- **Leitura do WAHA depende do engine WEBJS saudável** ("envia mas não lê", HTTP 500 em
+  `chats/*/messages`; a solução foi subir a imagem). O aviso (saída) não depende disso; as
+  respostas sim.
+- **ReceitaWS** tem teto ~3 req/min no plano gratuito; lote de NFs no mesmo minuto cai no
+  fallback pelo CRT do XML (comportamento já previsto).
+- **MVA padrão 50,39%** para NCM fora da tabela é estimativa; a mensagem diz quantos itens o usaram.
+- **NCM repetido**: a mesma pergunta voltará para o mesmo produto em outra NF. Quando incomodar,
+  gravar as classificações respondidas (fornecedor + código do produto → imposto) e consultar
+  antes de perguntar (30 linhas).
+- **Nunca marca "enviado" antes do fato**: aviso só grava o id com resposta ok do WAHA; falha
+  volta no próximo ciclo.

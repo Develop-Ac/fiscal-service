@@ -14,7 +14,9 @@ const { comando, parseVencimento, parseClassificacao } = createRequire(import.me
 
 // comando()
 assert.equal(comando('Ajustado!'), 'AJUSTADO');
-assert.equal(comando('pode enviar 25/09'), 'AUTORIZAR');
+assert.equal(comando('enviado 25/09'), 'ENVIADO');
+assert.equal(comando('Enviada 25/09'), 'ENVIADO');
+assert.equal(comando('pode enviar 25/09'), 'ENVIADO', 'forma antiga segue aceita');
 assert.equal(comando('manual'), 'MANUAL');
 assert.equal(comando('3 st\n7 difal'), 'CLASSIFICAR');
 assert.equal(comando('todos st'), 'CLASSIFICAR');
@@ -22,11 +24,11 @@ assert.equal(comando('bom dia pessoal'), null);
 assert.equal(comando('tem 3 caixas'), null, 'número seguido de palavra comum não é classificação');
 
 // parseVencimento()
-assert.equal(parseVencimento('pode enviar 25/09', 2026), '2026-09-25');
-assert.equal(parseVencimento('pode enviar 5/1/27', 2026), '2027-01-05');
-assert.equal(parseVencimento('pode enviar 05/01/2027', 2026), '2027-01-05');
-assert.equal(parseVencimento('pode enviar', 2026), null);
-assert.equal(parseVencimento('pode enviar 32/13', 2026), null);
+assert.equal(parseVencimento('enviado 25/09', 2026), '2026-09-25');
+assert.equal(parseVencimento('enviado 5/1/27', 2026), '2027-01-05');
+assert.equal(parseVencimento('enviado 05/01/2027', 2026), '2027-01-05');
+assert.equal(parseVencimento('enviado', 2026), null);
+assert.equal(parseVencimento('enviado 32/13', 2026), null);
 
 // parseClassificacao()
 assert.deepEqual(parseClassificacao('3 st\n7 difal\n9 tributada', [3, 7, 9]), { 3: 'ST', 7: 'DIFAL', 9: 'TRIBUTADA' });

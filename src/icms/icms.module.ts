@@ -7,13 +7,10 @@ import { AuditoriaReauditoriaCron } from './auditoria-reauditoria.cron';
 import { SimplesNacionalService } from './simples-nacional.service';
 import { StFluxoService } from './st-fluxo.service';
 import { StFluxoCron } from './st-fluxo.cron';
-import { StFluxoTeamsCron } from './st-fluxo-teams.cron';
-import { TeamsModule } from '../shared/teams/teams.module';
 
 @Module({
-    imports: [TeamsModule],
     controllers: [IcmsController],
-    providers: [IcmsService, SimplesNacionalService, IcmsSyncCron, AuditoriaAjustadoCron, AuditoriaReauditoriaCron, StFluxoService, StFluxoCron, StFluxoTeamsCron],
+    providers: [IcmsService, SimplesNacionalService, IcmsSyncCron, AuditoriaAjustadoCron, AuditoriaReauditoriaCron, StFluxoService, StFluxoCron],
     // O SpedModule reusa o gerador de DANFE daqui em vez de ter o seu próprio.
     exports: [IcmsService],
 })

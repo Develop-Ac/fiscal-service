@@ -3,7 +3,6 @@ import { PrismaService } from '../prisma/prisma.service';
 import { IcmsService } from './icms.service';
 import { FiscalConferenceItemDto } from './dto/fiscal-conference.dto';
 import { Classificacao, comando, parseClassificacao, parseVencimento } from './st-fluxo.parse';
-import { TeamsGraphClient } from '../shared/teams/teams-graph.client';
 
 /**
  * Fluxo automático do ICMS-ST/DIFAL de entrada (docs/automacao-icms-st.md).
@@ -32,7 +31,6 @@ export class StFluxoService {
     constructor(
         private readonly prisma: PrismaService,
         private readonly icms: IcmsService,
-        private readonly teams: TeamsGraphClient,
     ) {}
 
     /** Um ciclo: NFs novas + reenvio de avisos que falharam. Nunca lança. */
@@ -62,7 +60,7 @@ export class StFluxoService {
         // Aviso que não saiu (WAHA fora, etc.): tenta de novo.
         const semAviso = await this.prisma.$queryRawUnsafe<any[]>(
             `SELECT * FROM com_nfe_st_fluxo
-              WHERE waha_msg_aviso IS NULL AND estado IN ('AGUARDANDO_AUTORIZACAO','NCM_PENDENTE')
+              WHERE waha_msg_aviso IS NULL AND estado IN ('AGUARDANDO_ENVIO','NCM_PENDENTE')
               ORDER BY created_at LIMIT 20`,
         );
         for (const f of semAviso) {
@@ -72,6 +70,34 @@ export class StFluxoService {
                 this.logger.error(`Falha ao avisar NF ${f.chave_nfe}: ${e instanceof Error ? e.message : String(e)}`);
             }
         }
+
+        await this.detectarGuiasAnexadas();
+    }
+
+    /**
+     * O envio ao escritório e o anexo da guia são manuais. Quando a guia aparece
+     * (upload pela tela em com_nfe_guia_pdf, ou scanner em esc_documento), o
+     * fluxo fecha sozinho, sem aviso — a tela já mostra "Guia recebida".
+     */
+    private async detectarGuiasAnexadas(): Promise<void> {
+        const rows = await this.prisma.$queryRawUnsafe<Array<{ chave_nfe: string }>>(
+            `SELECT f.chave_nfe FROM com_nfe_st_fluxo f
+              WHERE f.estado IN ('AGUARDANDO_ENVIO','ENVIADA_ESCRITORIO')
+                AND (EXISTS (SELECT 1 FROM com_nfe_guia_pdf g WHERE g.chave_nfe = f.chave_nfe)
+                  OR EXISTS (SELECT 1 FROM esc_documento e WHERE e.chave_nfe = f.chave_nfe AND e.tipo = 'guia-icms-st'))
+              LIMIT 50`,
+        ).catch((e) => {
+            this.logger.warn(`Detecção de guia anexada falhou: ${e instanceof Error ? e.message : String(e)}`);
+            return [];
+        });
+        for (const r of rows) {
+            await this.gravar(r.chave_nfe, { estado: 'GUIA_RECEBIDA', guia_recebida_em: new Date() });
+            this.logger.log(`NF ${this.numeroNf(r.chave_nfe)}: guia anexada, fluxo encerrado.`);
+        }
+    }
+
+    private numeroNf(chave: string): string {
+        return String(chave).substring(25, 34).replace(/^0+/, '');
     }
 
     private async iniciar(chave: string): Promise<void> {
@@ -169,7 +195,7 @@ export class StFluxoService {
         });
 
         await this.gravar(chave, {
-            estado: temGuia ? 'AGUARDANDO_AUTORIZACAO' : 'SEM_GUIA',
+            estado: temGuia ? 'AGUARDANDO_ENVIO' : 'SEM_GUIA',
             tipo_guia: [st.length && 'ICMS_ST', difal.length && 'DIFAL'].filter(Boolean).join('/') || null,
             valor_guia: total,
             valor_excedente: excedente,
@@ -210,7 +236,7 @@ export class StFluxoService {
                 `A recolher: *R$ ${brl(f.valor_guia)}*\n` +
                 (Number(f.valor_excedente) > 0 ? `Excedente: ST destacada acima da calculada em R$ ${brl(f.valor_excedente)} (sem guia)\n` : '') +
                 (Number(f.itens_padrao) > 0 ? `${f.itens_padrao} item(ns) com MVA padrão 50,39% (NCM fora da tabela)\n` : '') +
-                `\n↩️ Responda a esta mensagem com *pode enviar dd/mm* (vencimento) para pedir a guia ao escritório, ou *manual* para tratar na tela.\n` +
+                `\n📨 *Tem guia para pedir ao escritório.* Depois de mandar, responda a esta mensagem com *enviado dd/mm* (vencimento) para registrar, ou *manual* para tratar na tela.\n` +
                 `\`${f.chave_nfe}\``;
         }
 
@@ -236,7 +262,7 @@ export class StFluxoService {
     async processarRespostasWaha(): Promise<void> {
         const auditoria = process.env.WAHA_GROUP_CHAT_ID;
         const guias = this.grupoGuias;
-        const cmdGuias = ['AUTORIZAR', 'MANUAL', 'CLASSIFICAR'];
+        const cmdGuias = ['ENVIADO', 'MANUAL', 'CLASSIFICAR'];
         if (auditoria && auditoria === guias) {
             await this.lerGrupo(auditoria, new Set(['AJUSTADO', ...cmdGuias]));
             return;
@@ -316,20 +342,20 @@ export class StFluxoService {
             return 'MANUAL';
         }
 
-        if (cmd === 'AUTORIZAR') {
-            if (estado !== 'AGUARDANDO_AUTORIZACAO') {
-                await this.responder(`ℹ️ NF *${numero}* está em *${estado}*; nada a autorizar.`, msgId, chatId);
+        if (cmd === 'ENVIADO') {
+            if (estado !== 'AGUARDANDO_ENVIO') {
+                await this.responder(`ℹ️ NF *${numero}* está em *${estado}*; nada a registrar.`, msgId, chatId);
                 return 'ESTADO_INVALIDO';
             }
             const venc = parseVencimento(body);
             if (!venc) {
-                await this.responder('❓ Qual o vencimento? Ex.: *pode enviar 25/09*', msgId, chatId);
+                await this.responder('❓ Qual o vencimento? Ex.: *enviado 25/09*', msgId, chatId);
                 return 'SEM_VENCIMENTO';
             }
-            await this.gravar(f.chave_nfe, { estado: 'AUTORIZADA', vencimento: venc, autorizado_por: quem, autorizado_em: new Date() });
+            await this.gravar(f.chave_nfe, { estado: 'ENVIADA_ESCRITORIO', vencimento: venc, autorizado_por: quem, autorizado_em: new Date() });
             const [a, mes, d] = venc.split('-');
-            await this.responder(`✅ NF *${numero}* autorizada, vencimento ${d}/${mes}/${a}. Vou pedir a guia ao escritório.`, msgId, chatId);
-            return 'AUTORIZADA';
+            await this.responder(`✅ NF *${numero}* registrada como enviada ao escritório, vencimento ${d}/${mes}/${a}. Quando a guia chegar, anexe pela tela ou pelo scanner.`, msgId, chatId);
+            return 'ENVIADA';
         }
 
         // CLASSIFICAR
@@ -346,145 +372,6 @@ export class StFluxoService {
         // calcular() repergunta só o que faltar, ou avisa o resultado (waha_msg_aviso volta a null).
         await this.calcular(f.chave_nfe, { ...(f.classificacao || {}), ...novas });
         return 'CLASSIFICADA';
-    }
-
-    // ------------------------------------------------------------------
-    // Fase 3: Teams — pedido da guia ao escritório e leitura da resposta (2.4)
-    // ------------------------------------------------------------------
-
-    /** Um ciclo: NFs autorizadas ainda não pedidas → posta no chat; depois lê as respostas com PDF. */
-    async processarTeams(): Promise<void> {
-        if (!this.teams.configurado) return;
-
-        const autorizadas = await this.prisma.$queryRawUnsafe<any[]>(
-            `SELECT * FROM com_nfe_st_fluxo WHERE estado = 'AUTORIZADA' AND teams_msg_id IS NULL ORDER BY autorizado_em LIMIT 10`,
-        );
-        for (const f of autorizadas) {
-            try {
-                await this.solicitarNoTeams(f);
-            } catch (e) {
-                this.logger.error(`Falha ao pedir guia da NF ${f.chave_nfe} no Teams: ${e instanceof Error ? e.message : String(e)}`);
-            }
-        }
-
-        await this.lerGuiasDoTeams();
-    }
-
-    private numeroNf(chave: string): string {
-        return String(chave).substring(25, 34).replace(/^0+/, '');
-    }
-
-    /** Sobe XML + DANFE no OneDrive da conta de serviço e posta o pedido no chat. */
-    private async solicitarNoTeams(f: any): Promise<void> {
-        const nf = await this.prisma.nfeConciliacao.findUnique({ where: { chave_nfe: f.chave_nfe } });
-        if (!nf) return;
-        const numero = this.numeroNf(f.chave_nfe);
-        const [a, m, d] = String(f.vencimento instanceof Date ? f.vencimento.toISOString().slice(0, 10) : f.vencimento).split('-');
-        const venc = `${d}/${m}/${a}`;
-        const cnpj = String(nf.cnpj_emitente || '').replace(/\D/g, '').replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
-        const brl = Number(f.valor_guia || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
-        const tipo = String(f.tipo_guia || 'ICMS_ST').replace('_', '-').replace('/', ' + ');
-
-        const html =
-            `<b>Solicitação de guia de ${tipo} — NF ${numero}</b><br>` +
-            `Fornecedor: ${nf.emitente} — CNPJ ${cnpj}<br>` +
-            `Chave: ${f.chave_nfe}<br>` +
-            `Valor a recolher: R$ ${brl} — Vencimento: ${venc}<br>` +
-            `Anexos: XML da NF-e e DANFE.<br>` +
-            `Por favor, responder a esta mensagem com a guia em PDF.`;
-
-        if (process.env.ST_FLUXO_DRY_RUN === '1') {
-            this.logger.log(`DRY-RUN Teams (NF ${numero}):\n${html.replace(/<br>/g, '\n').replace(/<[^>]+>/g, '')}`);
-            return;
-        }
-
-        const xml = await this.icms.decodeXml(nf.xml_completo);
-        const danfe = await this.icms.generateDanfe(nf.xml_completo);
-        const pasta = `NF-${numero}-${f.chave_nfe.slice(-6)}`;
-        const anexos = [
-            await this.teams.subirArquivo(`NF-${numero}.xml`, Buffer.from(xml, 'utf8'), pasta),
-            await this.teams.subirArquivo(`DANFE-NF-${numero}.pdf`, danfe, pasta),
-        ];
-        const msgId = await this.teams.postarMensagem(html, anexos);
-        await this.gravar(f.chave_nfe, { estado: 'SOLICITADA', teams_msg_id: msgId });
-        await this.avisarGrupo(`📨 Guia da NF *${numero}* solicitada ao escritório (venc. ${d}/${m}).`);
-        this.logger.log(`NF ${numero}: guia solicitada no Teams (msg ${msgId}).`);
-    }
-
-    /**
-     * Lê o chat: mensagem de outra pessoa com PDF anexo → casa com uma NF
-     * SOLICITADA (resposta citando nosso pedido, chave ou nº da NF no texto ou
-     * no nome do arquivo) → baixa → anexa à nota → avisa. Sem NF identificável,
-     * avisa e não adivinha. Idempotente por id da mensagem (prefixo teams:).
-     */
-    private async lerGuiasDoTeams(): Promise<void> {
-        const solicitadas = await this.prisma.$queryRawUnsafe<any[]>(
-            `SELECT chave_nfe, teams_msg_id, autorizado_em FROM com_nfe_st_fluxo WHERE estado = 'SOLICITADA'`,
-        );
-        if (!solicitadas.length) return;
-        const desde = Math.min(...solicitadas.map((s) => new Date(s.autorizado_em || 0).getTime()));
-        const eu = await this.teams.usuarioId();
-        const msgs = await this.teams.listarMensagens(50);
-
-        for (const m of msgs) {
-            try {
-                if (!m?.id || m.messageType !== 'message') continue;
-                if (eu && m.from?.user?.id === eu) continue;
-                if (m.createdDateTime && new Date(m.createdDateTime).getTime() < desde) continue;
-                const anexos: any[] = Array.isArray(m.attachments) ? m.attachments : [];
-                const pdfs = anexos.filter((a) => a?.contentType === 'reference' && /\.pdf(\?|$)/i.test(String(a.name || a.contentUrl || '')));
-                if (!pdfs.length) continue;
-
-                const idKey = `teams:${m.id}`;
-                const ja = await this.prisma.$queryRawUnsafe<any[]>(`SELECT 1 FROM com_nfe_ajustado_processado WHERE waha_msg_id = $1`, idKey);
-                if (ja.length) continue;
-
-                // 1) resposta citando o nosso pedido
-                const ref = anexos.find((a) => a?.contentType === 'messageReference');
-                let refId: string | null = null;
-                try { refId = ref ? String(JSON.parse(ref.content || '{}').messageId ?? '') : null; } catch { refId = null; }
-                let alvo = refId ? solicitadas.find((s) => String(s.teams_msg_id) === refId) : undefined;
-                // 2) chave ou nº da NF no texto / nome do arquivo
-                if (!alvo) {
-                    const texto = `${String(m.body?.content || '').replace(/<[^>]+>/g, ' ')} ${pdfs.map((p) => p.name).join(' ')}`;
-                    alvo = solicitadas.find((s) => texto.includes(s.chave_nfe))
-                        ?? solicitadas.find((s) => new RegExp(`(?:NF|nota|guia)\\D{0,15}0*${this.numeroNf(s.chave_nfe)}(?!\\d)`, 'i').test(texto));
-                }
-                if (!alvo) {
-                    await this.avisarGrupo(`📎 O escritório mandou um PDF no Teams (${pdfs[0].name || 'sem nome'}) sem NF identificada. Anexe pela tela se for uma guia.`);
-                    await this.icms.marcarAjustadoProcessado(idKey, null, 'TEAMS_SEM_NF');
-                    continue;
-                }
-
-                const numero = this.numeroNf(alvo.chave_nfe);
-                let pdf: Buffer;
-                try {
-                    pdf = await this.teams.baixarPorUrl(String(pdfs[0].contentUrl));
-                } catch (e) {
-                    await this.avisarGrupo(`⚠️ A guia da NF *${numero}* chegou no Teams mas não consegui baixar o PDF (${e instanceof Error ? e.message.slice(0, 120) : e}). Anexe pela tela.`);
-                    await this.icms.marcarAjustadoProcessado(idKey, alvo.chave_nfe, 'TEAMS_DOWNLOAD_FALHOU');
-                    continue;
-                }
-                await this.icms.uploadGuiaByNfe(alvo.chave_nfe, { buffer: pdf, originalname: String(pdfs[0].name || `guia-nf-${numero}.pdf`), mimetype: 'application/pdf' });
-                await this.gravar(alvo.chave_nfe, { estado: 'GUIA_RECEBIDA', teams_guia_msg_id: String(m.id), guia_recebida_em: new Date() });
-                await this.avisarGrupo(`✅ Guia da NF *${numero}* recebida do escritório e anexada à nota na intranet.`);
-                await this.icms.marcarAjustadoProcessado(idKey, alvo.chave_nfe, 'TEAMS_GUIA_OK');
-                solicitadas.splice(solicitadas.indexOf(alvo), 1);
-                this.logger.log(`NF ${numero}: guia recebida do Teams e anexada.`);
-            } catch (e) {
-                // Não marca: tenta de novo no próximo ciclo.
-                this.logger.error(`Falha ao tratar mensagem do Teams ${m?.id}: ${e instanceof Error ? e.message : String(e)}`);
-            }
-        }
-    }
-
-    /** Aviso solto no grupo das guias (sem citar mensagem); em DRY-RUN só loga. */
-    private async avisarGrupo(texto: string): Promise<void> {
-        if (process.env.ST_FLUXO_DRY_RUN === '1') {
-            this.logger.log(`DRY-RUN aviso WhatsApp: ${texto}`);
-            return;
-        }
-        await this.icms.wahaEnviarTexto(texto, undefined, this.grupoGuias);
     }
 
     /** Resposta curta citando a mensagem da pessoa, no grupo de onde ela veio; em DRY-RUN só loga. */
