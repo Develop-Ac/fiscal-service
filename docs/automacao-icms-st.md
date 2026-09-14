@@ -14,6 +14,8 @@ WhatsApp e o cálculo só roda depois que todos os itens foram respondidos.
   decide**: sem o cadastro dizer revenda, uma pessoa escolhe entre ST, DIFAL e tributada.
 - Qualquer membro do grupo do WhatsApp pode autorizar o envio ao escritório.
 - No Teams a conversa com o escritório é um **chat em grupo** (não canal de equipe).
+- O fluxo das guias usa um **grupo de WhatsApp próprio** (`WAHA_GUIAS_CHAT_ID`), separado do grupo
+  "Conferência Fiscal" da auditoria (`WAHA_GROUP_CHAT_ID`). O "ajustado" continua no grupo antigo.
 
 ## 1. Como funciona hoje (o que o plano reaproveita)
 
@@ -42,7 +44,8 @@ stateDiagram-v2
     NCM_PENDENTE --> CALCULADA : todos classificados
     CALCULADA --> SEM_GUIA : valor a recolher <= tolerância
     CALCULADA --> AGUARDANDO_AUTORIZACAO : valor a recolher > tolerância (avisa no WhatsApp)
-    AGUARDANDO_AUTORIZACAO --> SOLICITADA : "pode enviar dd/mm" → posta no Teams
+    AGUARDANDO_AUTORIZACAO --> AUTORIZADA : "pode enviar dd/mm" (vencimento gravado)
+    AUTORIZADA --> SOLICITADA : postada no chat do Teams (Fase 3)
     AGUARDANDO_AUTORIZACAO --> MANUAL : "manual"
     SOLICITADA --> GUIA_RECEBIDA : escritório responde com PDF → anexa → avisa
     SOLICITADA --> SOLICITADA : lembrete se passar N dias sem guia
@@ -77,7 +80,7 @@ Valor da guia = soma de `diferenca` dos itens ST (positiva) + `vlDifal` dos iten
 hoje. `valorPagoAMais` (ST destacada acima da calculada) entra na mensagem como **excedente**,
 sem guia.
 
-### 2.2 Mensagens no WhatsApp (grupo Conferência Fiscal)
+### 2.2 Mensagens no WhatsApp (grupo das guias, `WAHA_GUIAS_CHAT_ID`)
 
 Todas terminam com a chave de 44 dígitos em `` `código` `` — é assim que o roteador reconhece
 a NF na resposta citada (padrão já usado pelo "ajustado").
@@ -115,16 +118,20 @@ Preciso saber o imposto de cada item para calcular:
 **E) Sem guia**: não avisa (fica registrado na tela como "Sem Guia - Verificado").
 **F) Lembrete**: `⏳ Guia da NF *12345* pedida há 3 dias e ainda sem retorno do escritório.`
 
-### 2.3 Respostas aceitas (roteador)
+### 2.3 Respostas aceitas (roteador) — **implementado (Fase 2)**
 
-`processarRespostasAjustadoWaha()` vira `processarRespostasWaha()`: lê o grupo uma vez por
-minuto (como hoje), para cada mensagem não tratada acha a chave na mensagem citada, busca o
-estado em `com_nfe_st_fluxo` e roteia:
+`StFluxoService.processarRespostasWaha()` (chamado pelo cron `auditoria-ajustado.cron.ts`, 1 min):
+lê o grupo da auditoria (só "ajustado") e o grupo das guias (os demais comandos); se as duas envs
+apontam para o mesmo grupo, lê uma vez com todos. Para cada mensagem não tratada acha a chave na
+mensagem citada, busca o estado em `com_nfe_st_fluxo` e roteia. Idempotência por id da mensagem
+em `com_nfe_ajustado_processado` (resultados novos: AUTORIZADA, MANUAL, CLASSIFICADA,
+CLASSIFICACAO_INVALIDA, ESTADO_INVALIDO, SEM_VENCIMENTO, FORA_DO_FLUXO). Mensagem sem comando
+conhecido é ignorada sem tocar no banco.
 
 | Estado da NF | Resposta | Regex | Efeito |
 |---|---|---|---|
 | qualquer | `ajustado` | (existente) | reconferência da auditoria (inalterado) |
-| `AGUARDANDO_AUTORIZACAO` | `pode enviar 25/09` ou `pode enviar 25/09/2026` | `/pode\s+enviar.*?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/i` | grava vencimento + quem autorizou → posta no Teams → `SOLICITADA` → msg C |
+| `AGUARDANDO_AUTORIZACAO` | `pode enviar 25/09` ou `pode enviar 25/09/2026` | `/pode\s+enviar.*?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/i` | grava vencimento + quem autorizou → estado `AUTORIZADA` → responde "✅ autorizada, vou pedir a guia"; a Fase 3 posta no Teams e passa a `SOLICITADA` (msg C) |
 | `AGUARDANDO_AUTORIZACAO` | `pode enviar` sem data | | responde "qual o vencimento? ex.: pode enviar 25/09" |
 | `AGUARDANDO_AUTORIZACAO` | `manual` | | `MANUAL`, some do fluxo |
 | `NCM_PENDENTE` | linhas `3 st`, `7 difal`, `9 tributada`, `todos st` (sinônimos: revenda = st, consumo/uso = difal) | `/^\s*(\d+|todos)\s*[:\-–]?\s*(st|revenda|difal|consumo|uso|tributad\w*)/im` por linha | grava `classificacao` por item e chama `StFluxoService.calcular(chave, classificacao)` (já pronto); repergunta só o que falta |
@@ -188,7 +195,7 @@ existe; leitura da resposta por IMAP), sem mudar nada do lado do WhatsApp.
 ```sql
 CREATE TABLE IF NOT EXISTS com_nfe_st_fluxo (
   chave_nfe          varchar(44) PRIMARY KEY REFERENCES com_nfe_conciliacao(chave_nfe),
-  estado             varchar(30) NOT NULL,          -- NCM_PENDENTE | SEM_GUIA | AGUARDANDO_AUTORIZACAO | SOLICITADA | GUIA_RECEBIDA | MANUAL | ERRO
+  estado             varchar(30) NOT NULL,          -- NCM_PENDENTE | SEM_GUIA | AGUARDANDO_AUTORIZACAO | AUTORIZADA | SOLICITADA | GUIA_RECEBIDA | MANUAL | ERRO
   tipo_guia          varchar(20),                   -- ICMS_ST | DIFAL | ICMS_ST/DIFAL
   valor_guia         numeric(14,2),
   valor_excedente    numeric(14,2),
@@ -228,7 +235,7 @@ Depois: `npx prisma db pull` + `npx prisma generate` (padrão DDL manual).
 |---|---|---|---|
 | **0** | Registro no Entra ID, conta de serviço no chat, id do chat, textos combinados com a equipe | — | admin do M365 |
 | **1** ✅ | Cálculo automático + aviso A/B no WhatsApp; badge de estado na lista de NF-e | `src/icms/st-fluxo.service.ts`, `st-fluxo.cron.ts`, `sql/2026-09-14_st_fluxo.sql`, `getPaymentStatusMap()` (campo `fluxo`), `cotacao-frontend app/(private)/fiscal/nfe/page.tsx` | aplicar o SQL; `ST_FLUXO_ENABLED=true` |
-| **2** | Roteador de respostas (pode enviar / manual / classificação) | `auditoria-ajustado.cron.ts` (renomear p/ `waha-respostas.cron.ts`), `st-fluxo.service.ts` | Fase 1 |
+| **2** ✅ | Roteador de respostas (pode enviar / manual / classificação) | `st-fluxo.service.ts` (`processarRespostasWaha`), `auditoria-ajustado.cron.ts` (agora chama o roteador), `icms.service.ts` (`wahaLerMensagens`, `tratarRespostaAjustado`, `wahaEnviarTexto` com `chatId`) | Fase 1; `WAHA_GUIAS_CHAT_ID` |
 | **3** | Teams: solicitação com anexos + leitura da guia + anexo automático + msg D | `src/shared/teams/teams-graph.client.ts` (novo), `teams.controller.ts` (`GET /teams/auth`, `/callback`), cron 2 min, `st-fluxo.service.ts` | Fase 0 e 2 |
 | **4** | Lembrete (msg F) e endpoints de intervenção: `GET /icms/st-fluxo`, `POST /icms/st-fluxo/:chave/manual`, `POST .../reenviar` | controller + tela | Fase 3 |
 
@@ -242,6 +249,7 @@ ST_FLUXO_ENABLED=true            # liga o cálculo automático (opt-in: fala com
 ST_FLUXO_DRY_RUN=1               # 1 = monta a mensagem e só loga (primeiro teste)
 ST_FLUXO_JANELA_DIAS=7           # só NFs emitidas nos últimos N dias (evita spam no 1º deploy)
 ST_FLUXO_CRON=* * * * *
+WAHA_GUIAS_CHAT_ID=              # grupo das guias (120363...@g.us); sem ele cai no WAHA_GROUP_CHAT_ID
 ST_FLUXO_LEMBRETE_DIAS=3
 TEAMS_TENANT_ID=
 TEAMS_CLIENT_ID=

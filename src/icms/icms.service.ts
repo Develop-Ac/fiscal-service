@@ -3352,11 +3352,12 @@ export class IcmsService {
         return blocos.join('\n\n');
     }
 
-    async wahaEnviarTexto(text: string, replyTo?: string): Promise<string | null> {
+    /** Envia texto num grupo do WAHA (default: grupo Conferência Fiscal). Devolve o id da mensagem. */
+    async wahaEnviarTexto(text: string, replyTo?: string, chatId?: string): Promise<string | null> {
         const base = process.env.WAHA_BASE_URL;
         const key = process.env.WAHA_API_KEY;
         const session = process.env.WAHA_SESSION || 'default';
-        const group = process.env.WAHA_GROUP_CHAT_ID;
+        const group = chatId || process.env.WAHA_GROUP_CHAT_ID;
         if (!base || !key || !group) return null;
         const body: any = { session, chatId: group, text };
         if (replyTo) body.reply_to = replyTo;
@@ -3373,112 +3374,71 @@ export class IcmsService {
     }
 
     /**
-     * Lê o grupo no WAHA, encontra respostas "ajustado" ao alerta de auditoria,
-     * reconfere a NF e responde no grupo. Idempotente via com_nfe_ajustado_processado.
-     * Tudo de SAÍDA (a intranet não recebe webhook da nuvem). Nunca lança.
+     * Lê as últimas mensagens do grupo no WAHA. Tudo de SAÍDA (a intranet não
+     * recebe webhook da nuvem), por isso é polling. null = WAHA não configurado
+     * ou recusou a leitura. Quem roteia as respostas (ajustado, pode enviar,
+     * manual, classificação de item) é StFluxoService.processarRespostasWaha().
      */
-    async processarRespostasAjustadoWaha(): Promise<void> {
+    async wahaLerMensagens(chatId?: string): Promise<any[] | null> {
         const base = process.env.WAHA_BASE_URL;
         const key = process.env.WAHA_API_KEY;
         const session = process.env.WAHA_SESSION || 'default';
-        const group = process.env.WAHA_GROUP_CHAT_ID;
+        const group = chatId || process.env.WAHA_GROUP_CHAT_ID;
         if (!base || !key || !group) {
-            this.logger.warn('WAHA_BASE_URL/WAHA_API_KEY/WAHA_GROUP_CHAT_ID não configurados: pulando polling de "ajustado".', 'Auditoria');
-            return;
+            this.logger.warn('WAHA_BASE_URL/WAHA_API_KEY/WAHA_GROUP_CHAT_ID não configurados: pulando polling de respostas.', 'Auditoria');
+            return null;
         }
-        const janelaMin = Number(process.env.WAHA_AJUSTADO_JANELA_MIN) > 0 ? Number(process.env.WAHA_AJUSTADO_JANELA_MIN) : 1440;
-        const limiteAntigoSec = Math.floor(Date.now() / 1000) - janelaMin * 60;
         const msgLimit = Number(process.env.WAHA_AJUSTADO_MSG_LIMIT) > 0 ? Number(process.env.WAHA_AJUSTADO_MSG_LIMIT) : 200;
-
         const url = `${base.replace(/\/$/, '')}/api/${session}/chats/${encodeURIComponent(group)}/messages?limit=${msgLimit}&downloadMedia=false`;
         const resp = await fetch(url, { headers: { 'X-Api-Key': key } });
         if (!resp.ok) {
             this.logger.error(`WAHA recusou leitura de mensagens: HTTP ${resp.status}`, undefined, 'Auditoria');
-            return;
+            return null;
         }
         const msgs: any[] = await resp.json();
-        if (!Array.isArray(msgs)) return;
-
-        for (const m of msgs) {
-            try {
-                if (m?.fromMe) continue;
-                const body = String(m?.body ?? '');
-                if (!/ajustad[oa]/i.test(body)) continue;
-
-                const msgId = String(m?.id ?? '');
-                if (!msgId) continue;
-
-                // Já tratada? (idempotência)
-                const ja = await this.prisma.$queryRawUnsafe<any[]>(
-                    `SELECT 1 FROM com_nfe_ajustado_processado WHERE waha_msg_id = $1`,
-                    msgId,
-                );
-                if (ja.length > 0) continue;
-
-                // Mensagem antiga (ex.: histórico no 1º deploy): marca e ignora, sem responder.
-                const ts = Number(m?.timestamp ?? 0);
-                if (ts && ts < limiteAntigoSec) {
-                    await this.marcarAjustadoProcessado(msgId, null, 'ANTIGO');
-                    continue;
-                }
-
-                // Chave (44 díg.) da mensagem citada (alerta) ou do próprio texto.
-                const citada = String(m?.replyTo?.body ?? m?._data?.quotedMsg?.body ?? '');
-                const match = `${citada}\n${body}`.match(/(\d{44})/);
-                if (!match) {
-                    await this.wahaEnviarTexto(
-                        '❓ Não consegui identificar a NF. *Responda à mensagem do alerta* (citando) com *ajustado*.',
-                        msgId,
-                    );
-                    await this.marcarAjustadoProcessado(msgId, null, 'SEM_CHAVE');
-                    continue;
-                }
-                const chave = match[1];
-
-                const detalhe = await this.reconferirAuditoria(chave);
-                if (!detalhe) {
-                    await this.wahaEnviarTexto(`⚠️ NF não encontrada na base de conciliação.\nChave: ${chave}`, msgId);
-                    await this.marcarAjustadoProcessado(msgId, chave, 'NAO_ENCONTRADA');
-                    continue;
-                }
-
-                const h = detalhe.header;
-                const numero = h?.numero ?? '-';
-                let texto: string;
-                let resultado: string;
-                if (h?.naoAuditavel) {
-                    texto = `ℹ️ *NF ${numero}* não está mais lançada no ERP (${h?.statusErp ?? '—'}) — fora da auditoria.\n\`${chave}\``;
-                    resultado = 'NAO_AUDITAVEL';
-                } else if ((h?.totalErros ?? 0) === 0) {
-                    texto =
-                        `🧾 *Auditoria fiscal* — ✅ *OK*\n\n` +
-                        `NF: *${numero}* - ${h?.emitente ?? '-'} (${h?.uf ?? '-'})\n\n` +
-                        `100% ajustada! Sem divergências. 👏\n\`${chave}\``;
-                    resultado = 'OK';
-                } else {
-                    texto =
-                        `🧾 *Auditoria fiscal* — 🚫 *ERRO* 🚫\n\n` +
-                        `NF: *${numero}* - ${h?.emitente ?? '-'} (${h?.uf ?? '-'})\n\n` +
-                        `Erros (${h.totalErros}):\n\n${this.blocosErrosDoDetalhe(detalhe) || '—'}\n\n` +
-                        `↩️ Após ajustar no ERP, responda *ajustado* novamente.\n\`${chave}\``;
-                    resultado = 'DIVERGENTE';
-                }
-
-                await this.wahaEnviarTexto(texto, msgId);
-                await this.marcarAjustadoProcessado(msgId, chave, resultado);
-                this.logger.log(`Resposta "ajustado" tratada (NF ${numero}, ${resultado}).`, 'Auditoria');
-            } catch (e) {
-                // Não marca como processada: tenta de novo no próximo ciclo.
-                this.logger.error(
-                    `Falha ao tratar resposta "ajustado" (msg ${m?.id}): ${e instanceof Error ? e.message : String(e)}`,
-                    undefined,
-                    'Auditoria',
-                );
-            }
-        }
+        return Array.isArray(msgs) ? msgs : null;
     }
 
-    private async marcarAjustadoProcessado(msgId: string, chave: string | null, resultado: string): Promise<void> {
+    /**
+     * Resposta "ajustado" ao alerta de auditoria: reconfere a NF e responde no
+     * grupo (✅ 100% ou ⚠️ erros restantes). Idempotente via com_nfe_ajustado_processado.
+     */
+    async tratarRespostaAjustado(msgId: string, chave: string): Promise<void> {
+        const detalhe = await this.reconferirAuditoria(chave);
+        if (!detalhe) {
+            await this.wahaEnviarTexto(`⚠️ NF não encontrada na base de conciliação.\nChave: ${chave}`, msgId);
+            await this.marcarAjustadoProcessado(msgId, chave, 'NAO_ENCONTRADA');
+            return;
+        }
+
+        const h = detalhe.header;
+        const numero = h?.numero ?? '-';
+        let texto: string;
+        let resultado: string;
+        if (h?.naoAuditavel) {
+            texto = `ℹ️ *NF ${numero}* não está mais lançada no ERP (${h?.statusErp ?? '—'}) — fora da auditoria.\n\`${chave}\``;
+            resultado = 'NAO_AUDITAVEL';
+        } else if ((h?.totalErros ?? 0) === 0) {
+            texto =
+                `🧾 *Auditoria fiscal* — ✅ *OK*\n\n` +
+                `NF: *${numero}* - ${h?.emitente ?? '-'} (${h?.uf ?? '-'})\n\n` +
+                `100% ajustada! Sem divergências. 👏\n\`${chave}\``;
+            resultado = 'OK';
+        } else {
+            texto =
+                `🧾 *Auditoria fiscal* — 🚫 *ERRO* 🚫\n\n` +
+                `NF: *${numero}* - ${h?.emitente ?? '-'} (${h?.uf ?? '-'})\n\n` +
+                `Erros (${h.totalErros}):\n\n${this.blocosErrosDoDetalhe(detalhe) || '—'}\n\n` +
+                `↩️ Após ajustar no ERP, responda *ajustado* novamente.\n\`${chave}\``;
+            resultado = 'DIVERGENTE';
+        }
+
+        await this.wahaEnviarTexto(texto, msgId);
+        await this.marcarAjustadoProcessado(msgId, chave, resultado);
+        this.logger.log(`Resposta "ajustado" tratada (NF ${numero}, ${resultado}).`, 'Auditoria');
+    }
+
+    async marcarAjustadoProcessado(msgId: string, chave: string | null, resultado: string): Promise<void> {
         await this.prisma.$executeRawUnsafe(
             `INSERT INTO com_nfe_ajustado_processado (waha_msg_id, chave_nfe, resultado)
              VALUES ($1, $2, $3) ON CONFLICT (waha_msg_id) DO NOTHING`,

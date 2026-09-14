@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { IcmsService } from './icms.service';
 import { FiscalConferenceItemDto } from './dto/fiscal-conference.dto';
+import { Classificacao, comando, parseClassificacao, parseVencimento } from './st-fluxo.parse';
 
 /**
  * Fluxo automático do ICMS-ST/DIFAL de entrada (docs/automacao-icms-st.md).
@@ -22,7 +23,6 @@ import { FiscalConferenceItemDto } from './dto/fiscal-conference.dto';
  * só é preenchido quando o XML completo foi lido (maybeAlertMva), então serve
  * de sinal "tem itens" sem decodificar XML de resumo a cada minuto.
  */
-export type Classificacao = 'ST' | 'DIFAL' | 'TRIBUTADA';
 
 @Injectable()
 export class StFluxoService {
@@ -217,8 +217,142 @@ export class StFluxoService {
             await this.gravar(f.chave_nfe, { waha_msg_aviso: 'dry-run' });
             return;
         }
-        const id = await this.icms.wahaEnviarTexto(texto);
+        const id = await this.icms.wahaEnviarTexto(texto, undefined, this.grupoGuias);
         if (id) await this.gravar(f.chave_nfe, { waha_msg_aviso: id });
+    }
+
+    // ------------------------------------------------------------------
+    // Fase 2: respostas no grupo do WhatsApp (docs/automacao-icms-st.md, 2.3)
+    // ------------------------------------------------------------------
+
+    /**
+     * Lê o grupo e trata cada resposta não processada que cita uma NF (chave de
+     * 44 dígitos na mensagem citada ou no texto). Idempotente por id de mensagem
+     * em com_nfe_ajustado_processado. Mensagem sem comando conhecido é ignorada
+     * sem tocar no banco. Nunca lança.
+     */
+    async processarRespostasWaha(): Promise<void> {
+        const auditoria = process.env.WAHA_GROUP_CHAT_ID;
+        const guias = this.grupoGuias;
+        const cmdGuias = ['AUTORIZAR', 'MANUAL', 'CLASSIFICAR'];
+        if (auditoria && auditoria === guias) {
+            await this.lerGrupo(auditoria, new Set(['AJUSTADO', ...cmdGuias]));
+            return;
+        }
+        if (auditoria) await this.lerGrupo(auditoria, new Set(['AJUSTADO']));
+        if (guias) await this.lerGrupo(guias, new Set(cmdGuias));
+    }
+
+    /** Grupo do WhatsApp do fluxo de guias; sem WAHA_GUIAS_CHAT_ID cai no grupo da auditoria. */
+    private get grupoGuias(): string | undefined {
+        return process.env.WAHA_GUIAS_CHAT_ID || process.env.WAHA_GROUP_CHAT_ID;
+    }
+
+    private async lerGrupo(chatId: string, aceitos: Set<string>): Promise<void> {
+        const msgs = await this.icms.wahaLerMensagens(chatId);
+        if (!msgs) return;
+        const janelaMin = Number(process.env.WAHA_AJUSTADO_JANELA_MIN) > 0 ? Number(process.env.WAHA_AJUSTADO_JANELA_MIN) : 1440;
+        const limiteAntigoSec = Math.floor(Date.now() / 1000) - janelaMin * 60;
+
+        for (const m of msgs) {
+            try {
+                if (m?.fromMe) continue;
+                const body = String(m?.body ?? '');
+                const cmd = comando(body);
+                if (!cmd || !aceitos.has(cmd)) continue;
+                const msgId = String(m?.id ?? '');
+                if (!msgId) continue;
+
+                const ja = await this.prisma.$queryRawUnsafe<any[]>(`SELECT 1 FROM com_nfe_ajustado_processado WHERE waha_msg_id = $1`, msgId);
+                if (ja.length > 0) continue;
+
+                // Mensagem antiga (ex.: histórico no 1º deploy): marca e ignora, sem responder.
+                const ts = Number(m?.timestamp ?? 0);
+                if (ts && ts < limiteAntigoSec) {
+                    await this.icms.marcarAjustadoProcessado(msgId, null, 'ANTIGO');
+                    continue;
+                }
+
+                const citada = String(m?.replyTo?.body ?? m?._data?.quotedMsg?.body ?? '');
+                const chave = `${citada}\n${body}`.match(/(\d{44})/)?.[1] ?? null;
+                if (!chave) {
+                    await this.responder('❓ Não consegui identificar a NF. *Responda à mensagem da NF* (citando).', msgId, chatId);
+                    await this.icms.marcarAjustadoProcessado(msgId, null, 'SEM_CHAVE');
+                    continue;
+                }
+
+                if (cmd === 'AJUSTADO') {
+                    await this.icms.tratarRespostaAjustado(msgId, chave);
+                    continue;
+                }
+
+                const [f] = await this.prisma.$queryRawUnsafe<any[]>(`SELECT * FROM com_nfe_st_fluxo WHERE chave_nfe = $1`, chave);
+                const numero = chave.substring(25, 34).replace(/^0+/, '');
+                if (!f) {
+                    await this.responder(`ℹ️ NF *${numero}* não está no fluxo automático de ICMS-ST.`, msgId, chatId);
+                    await this.icms.marcarAjustadoProcessado(msgId, chave, 'FORA_DO_FLUXO');
+                    continue;
+                }
+                const quem = String(m?.participant ?? m?._data?.author ?? m?.from ?? '').replace(/\D/g, '').slice(0, 30);
+                const resultado = await this.rotear(cmd, f, body, numero, quem, msgId, chatId);
+                await this.icms.marcarAjustadoProcessado(msgId, chave, resultado);
+                this.logger.log(`Resposta ${cmd} tratada (NF ${numero}, ${resultado}).`);
+            } catch (e) {
+                // Não marca como processada: tenta de novo no próximo ciclo.
+                this.logger.error(`Falha ao tratar resposta (msg ${m?.id}): ${e instanceof Error ? e.message : String(e)}`);
+            }
+        }
+    }
+
+    /** Aplica o comando ao estado da NF e responde no grupo. Devolve o resultado para o registro. */
+    private async rotear(cmd: string, f: any, body: string, numero: string, quem: string, msgId: string, chatId: string): Promise<string> {
+        const estado = String(f.estado);
+
+        if (cmd === 'MANUAL') {
+            await this.gravar(f.chave_nfe, { estado: 'MANUAL', autorizado_por: quem, autorizado_em: new Date() });
+            await this.responder(`👍 NF *${numero}* saiu do fluxo automático; tratar na tela.`, msgId, chatId);
+            return 'MANUAL';
+        }
+
+        if (cmd === 'AUTORIZAR') {
+            if (estado !== 'AGUARDANDO_AUTORIZACAO') {
+                await this.responder(`ℹ️ NF *${numero}* está em *${estado}*; nada a autorizar.`, msgId, chatId);
+                return 'ESTADO_INVALIDO';
+            }
+            const venc = parseVencimento(body);
+            if (!venc) {
+                await this.responder('❓ Qual o vencimento? Ex.: *pode enviar 25/09*', msgId, chatId);
+                return 'SEM_VENCIMENTO';
+            }
+            await this.gravar(f.chave_nfe, { estado: 'AUTORIZADA', vencimento: venc, autorizado_por: quem, autorizado_em: new Date() });
+            const [a, mes, d] = venc.split('-');
+            await this.responder(`✅ NF *${numero}* autorizada, vencimento ${d}/${mes}/${a}. Vou pedir a guia ao escritório.`, msgId, chatId);
+            return 'AUTORIZADA';
+        }
+
+        // CLASSIFICAR
+        if (estado !== 'NCM_PENDENTE') {
+            await this.responder(`ℹ️ NF *${numero}* está em *${estado}*; não há item para classificar.`, msgId, chatId);
+            return 'ESTADO_INVALIDO';
+        }
+        const pendentes: number[] = (f.itens_pendentes || []).map((p: any) => Number(p.nItem));
+        const novas = parseClassificacao(body, pendentes);
+        if (!Object.keys(novas).length) {
+            await this.responder(`❓ Não entendi. Itens pendentes: ${pendentes.join(', ')}. Responda um por linha, ex.: *${pendentes[0]} st* (st, difal ou tributada), ou *todos st*.`, msgId, chatId);
+            return 'CLASSIFICACAO_INVALIDA';
+        }
+        // calcular() repergunta só o que faltar, ou avisa o resultado (waha_msg_aviso volta a null).
+        await this.calcular(f.chave_nfe, { ...(f.classificacao || {}), ...novas });
+        return 'CLASSIFICADA';
+    }
+
+    /** Resposta curta citando a mensagem da pessoa, no grupo de onde ela veio; em DRY-RUN só loga. */
+    private async responder(texto: string, replyTo: string, chatId: string): Promise<void> {
+        if (process.env.ST_FLUXO_DRY_RUN === '1') {
+            this.logger.log(`DRY-RUN resposta WhatsApp (${replyTo}): ${texto}`);
+            return;
+        }
+        await this.icms.wahaEnviarTexto(texto, replyTo, chatId);
     }
 
     /** Upsert da linha do fluxo. Colunas jsonb recebem objeto; o resto, valor simples. */
