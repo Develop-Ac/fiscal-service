@@ -3392,7 +3392,10 @@ export class IcmsService {
         const url = `${base.replace(/\/$/, '')}/api/${session}/chats/${encodeURIComponent(group)}/messages?limit=${msgLimit}&downloadMedia=false`;
         const resp = await fetch(url, { headers: { 'X-Api-Key': key } });
         if (!resp.ok) {
-            this.logger.error(`WAHA recusou leitura de mensagens: HTTP ${resp.status}`, undefined, 'Auditoria');
+            // 422 = chatId fora do padrão (ex.: sem @g.us); 500 em toda leitura com envio ok =
+            // engine WEBJS incompatível com o WhatsApp Web (subir a imagem do WAHA).
+            const corpo = (await resp.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 300);
+            this.logger.error(`WAHA recusou leitura de mensagens do grupo ${group}: HTTP ${resp.status} ${corpo}`, 'Auditoria');
             return null;
         }
         const msgs: any[] = await resp.json();
