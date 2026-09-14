@@ -72,6 +72,7 @@ export class StFluxoService {
         }
 
         await this.detectarGuiasAnexadas();
+        await this.lembrar();
     }
 
     /**
@@ -213,32 +214,7 @@ export class StFluxoService {
             where: { chave_nfe: f.chave_nfe },
             select: { emitente: true },
         });
-        const numero = this.numeroNf(f.chave_nfe);
-        const uf = this.icms.cufToSigla(String(f.chave_nfe).substring(0, 2));
-        const brl = (v: any) => Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
-        let texto: string;
-
-        if (f.estado === 'NCM_PENDENTE') {
-            const linhas = (f.itens_pendentes || [])
-                .map((p: any) => `• item ${p.nItem} — ${p.cProd} ${p.xProd} (NCM ${p.ncm}) — ${p.motivo}`)
-                .join('\n');
-            texto =
-                `❓ *Imposto a definir* — NF *${numero}* · ${nf?.emitente ?? '-'} (${uf})\n` +
-                `Preciso saber o imposto de cada item para calcular:\n${linhas}\n\n` +
-                `↩️ Responda citando esta mensagem, um item por linha:\n` +
-                `3 st · 7 difal · 9 tributada · ou: todos st\n` +
-                `\`${f.chave_nfe}\``;
-        } else {
-            const tipos = String(f.tipo_guia || '');
-            texto =
-                `🧾 *${tipos.replace('_', '-').replace('/', ' + ')} calculado* — NF *${numero}*\n` +
-                `Fornecedor: ${nf?.emitente ?? '-'} (${uf})\n` +
-                `A recolher: *R$ ${brl(f.valor_guia)}*\n` +
-                (Number(f.valor_excedente) > 0 ? `Excedente: ST destacada acima da calculada em R$ ${brl(f.valor_excedente)} (sem guia)\n` : '') +
-                (Number(f.itens_padrao) > 0 ? `${f.itens_padrao} item(ns) com MVA padrão 50,39% (NCM fora da tabela)\n` : '') +
-                `\n📨 *Tem guia para pedir ao escritório.* Depois de mandar, responda a esta mensagem com *enviado dd/mm* (vencimento) para registrar, ou *manual* para tratar na tela.\n` +
-                `\`${f.chave_nfe}\``;
-        }
+        const texto = this.montarAviso(f, nf?.emitente ?? '-');
 
         if (process.env.ST_FLUXO_DRY_RUN === '1') {
             this.logger.log(`DRY-RUN WhatsApp:\n${texto}`);
@@ -247,6 +223,130 @@ export class StFluxoService {
         }
         const id = await this.icms.wahaEnviarTexto(texto, undefined, this.grupoGuias);
         if (id) await this.gravar(f.chave_nfe, { waha_msg_aviso: id });
+    }
+
+    /** Texto da mensagem A (tem guia) ou B (imposto a definir) para a linha do fluxo. */
+    private montarAviso(f: any, emitente: string): string {
+        const numero = this.numeroNf(f.chave_nfe);
+        const uf = this.icms.cufToSigla(String(f.chave_nfe).substring(0, 2));
+        const brl = (v: any) => Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+
+        if (f.estado === 'NCM_PENDENTE') {
+            const linhas = (f.itens_pendentes || [])
+                .map((p: any) => `• item ${p.nItem} — ${p.cProd} ${p.xProd} (NCM ${p.ncm}) — ${p.motivo}`)
+                .join('\n');
+            return (
+                `❓ *Imposto a definir* — NF *${numero}* · ${emitente} (${uf})\n` +
+                `Preciso saber o imposto de cada item para calcular:\n${linhas}\n\n` +
+                `↩️ Responda citando esta mensagem, um item por linha:\n` +
+                `3 st · 7 difal · 9 tributada · ou: todos st\n` +
+                `\`${f.chave_nfe}\``
+            );
+        }
+        const tipos = String(f.tipo_guia || 'ICMS_ST');
+        return (
+            `🧾 *${tipos.replace('_', '-').replace('/', ' + ')} calculado* — NF *${numero}*\n` +
+            `Fornecedor: ${emitente} (${uf})\n` +
+            `A recolher: *R$ ${brl(f.valor_guia)}*\n` +
+            (Number(f.valor_excedente) > 0 ? `Excedente: ST destacada acima da calculada em R$ ${brl(f.valor_excedente)} (sem guia)\n` : '') +
+            (Number(f.itens_padrao) > 0 ? `${f.itens_padrao} item(ns) com MVA padrão 50,39% (NCM fora da tabela)\n` : '') +
+            `\n📨 *Tem guia para pedir ao escritório.* Depois de mandar, responda a esta mensagem com *enviado dd/mm* (vencimento) para registrar, ou *manual* para tratar na tela.\n` +
+            `\`${f.chave_nfe}\``
+        );
+    }
+
+    /**
+     * Manda no grupo das guias as mensagens que o fluxo produz, com dados
+     * fictícios, para a equipe ver o formato. É explícito (POST /icms/st-fluxo/exemplo),
+     * então envia mesmo com ST_FLUXO_DRY_RUN=1. Não grava nada.
+     */
+    async enviarExemplos(): Promise<{ grupo: string | undefined; enviadas: string[] }> {
+        const chaveA = '35260912345678000199550010000123451000123456';
+        const chaveB = '41260998765432000188550010000098761000098765';
+        const exemplos: Array<[string, string]> = [
+            ['A_tem_guia', this.montarAviso({
+                chave_nfe: chaveA, estado: 'AGUARDANDO_ENVIO', tipo_guia: 'ICMS_ST/DIFAL',
+                valor_guia: 1234.56, valor_excedente: 80.1, itens_padrao: 2,
+            }, 'FORNECEDOR EXEMPLO LTDA')],
+            ['B_imposto_a_definir', this.montarAviso({
+                chave_nfe: chaveB, estado: 'NCM_PENDENTE',
+                itens_pendentes: [
+                    { nItem: 3, cProd: 'ABC123', xProd: 'PARAFUSO SEXTAVADO M8', ncm: '73181500', motivo: 'sem vínculo no cadastro' },
+                    { nItem: 7, cProd: 'XYZ9', xProd: 'ÓLEO LUBRIFICANTE 1L', ncm: '27101932', motivo: 'revenda, NCM fora da tabela de ST' },
+                ],
+            }, 'OUTRO FORNECEDOR EXEMPLO SA')],
+            ['F_lembrete', this.montarLembrete({ chave_nfe: chaveA, estado: 'ENVIADA_ESCRITORIO', valor_guia: 1234.56 }, 3)],
+            ['exemplo_aviso', '⚠️ As 3 mensagens acima são *exemplos* com dados fictícios, disparados para mostrar o formato. Nada foi calculado nem registrado.'],
+        ];
+        const enviadas: string[] = [];
+        for (const [nome, texto] of exemplos) {
+            const id = await this.icms.wahaEnviarTexto(texto, undefined, this.grupoGuias);
+            if (id) enviadas.push(nome);
+        }
+        return { grupo: this.grupoGuias, enviadas };
+    }
+
+    // ------------------------------------------------------------------
+    // Fase 3: lembrete e intervenção
+    // ------------------------------------------------------------------
+
+    private montarLembrete(f: any, dias: number): string {
+        const numero = this.numeroNf(f.chave_nfe);
+        const brl = Number(f.valor_guia || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+        return f.estado === 'ENVIADA_ESCRITORIO'
+            ? `⏳ Guia da NF *${numero}* (R$ ${brl}) pedida ao escritório há ${dias} dias e ainda sem PDF anexado.\n\`${f.chave_nfe}\``
+            : `⏳ NF *${numero}* com guia de R$ ${brl} a pedir ao escritório há ${dias} dias, sem registro de envio.\n\`${f.chave_nfe}\``;
+    }
+
+    /**
+     * Guia parada: NF com guia a pedir (AGUARDANDO_ENVIO) ou pedida (ENVIADA_ESCRITORIO)
+     * há mais de ST_FLUXO_LEMBRETE_DIAS sem PDF → lembrete citando o aviso original;
+     * repete a cada N dias enquanto não fechar.
+     */
+    private async lembrar(): Promise<void> {
+        const dias = Number(process.env.ST_FLUXO_LEMBRETE_DIAS) > 0 ? Number(process.env.ST_FLUXO_LEMBRETE_DIAS) : 3;
+        const rows = await this.prisma.$queryRawUnsafe<any[]>(
+            `SELECT *, EXTRACT(EPOCH FROM NOW() - COALESCE(autorizado_em, created_at)) / 86400 AS idade_dias
+               FROM com_nfe_st_fluxo
+              WHERE estado IN ('AGUARDANDO_ENVIO','ENVIADA_ESCRITORIO')
+                AND waha_msg_aviso IS NOT NULL
+                AND COALESCE(lembrete_em, autorizado_em, created_at) < NOW() - ($1 || ' days')::interval
+              ORDER BY created_at LIMIT 20`,
+            String(dias),
+        );
+        for (const f of rows) {
+            const texto = this.montarLembrete(f, Math.floor(Number(f.idade_dias)));
+            if (process.env.ST_FLUXO_DRY_RUN === '1') {
+                this.logger.log(`DRY-RUN lembrete WhatsApp: ${texto}`);
+            } else {
+                const replyTo = f.waha_msg_aviso && !['dry-run', 'ok'].includes(f.waha_msg_aviso) ? f.waha_msg_aviso : undefined;
+                const id = await this.icms.wahaEnviarTexto(texto, replyTo, this.grupoGuias);
+                if (!id) continue; // WAHA fora: tenta no próximo ciclo
+            }
+            await this.gravar(f.chave_nfe, { lembrete_em: new Date() });
+        }
+    }
+
+    /** Linhas do fluxo (tela/intervenção). */
+    async listar(estado?: string): Promise<any[]> {
+        return this.prisma.$queryRawUnsafe<any[]>(
+            `SELECT f.*, c.emitente, c.data_emissao FROM com_nfe_st_fluxo f
+               JOIN com_nfe_conciliacao c ON c.chave_nfe = f.chave_nfe
+              ${estado ? 'WHERE f.estado = $1' : ''}
+              ORDER BY f.updated_at DESC LIMIT 500`,
+            ...(estado ? [estado] : []),
+        );
+    }
+
+    /** Tira a NF do fluxo automático (mesmo efeito do "manual" no WhatsApp). */
+    async marcarManual(chave: string, usuario?: string): Promise<void> {
+        await this.gravar(chave, { estado: 'MANUAL', autorizado_por: (usuario || 'tela').slice(0, 30), autorizado_em: new Date() });
+    }
+
+    /** Recalcula e reavisa (ex.: depois de vincular o produto no ERP ou de ERRO). */
+    async reprocessar(chave: string): Promise<void> {
+        const [f] = await this.prisma.$queryRawUnsafe<any[]>(`SELECT classificacao FROM com_nfe_st_fluxo WHERE chave_nfe = $1`, chave);
+        await this.calcular(chave, f?.classificacao || {});
     }
 
     // ------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # Automação do ICMS-ST/DIFAL de entrada: cálculo → aviso no WhatsApp → guia anexada
 
-Estado em 14/09/2026: **Fases 1 e 2 implementadas, não deployadas.** Objetivo: a NF de compra
+Estado em 14/09/2026: **Fases 1, 2 e 3 implementadas.** Objetivo: a NF de compra
 cair, o serviço calcular o ICMS-ST/DIFAL sozinho e avisar no grupo de guias do WhatsApp que há
 guia a pedir ao escritório. O pedido ao escritório e o anexo da guia continuam **manuais**; o
 fluxo percebe sozinho quando a guia foi anexada. Quando algum item não tem imposto decidido, a
@@ -147,7 +147,7 @@ FORA_DO_FLUXO). Não há modelo Prisma: tudo por `$queryRawUnsafe`, não precisa
 |---|---|---|---|
 | 1 | Cálculo automático + avisos A/B + badge na lista de NF-e | `src/icms/st-fluxo.service.ts`, `st-fluxo.cron.ts`, `sql/2026-09-14_st_fluxo.sql`, `getPaymentStatusMap()` (campo `fluxo`), `cotacao-frontend app/(private)/fiscal/nfe/page.tsx` | ✅ codada |
 | 2 | Roteador de respostas (enviado / manual / classificação) + detecção da guia anexada | `st-fluxo.parse.ts`, `st-fluxo.service.ts`, `auditoria-ajustado.cron.ts` (chama o roteador), `icms.service.ts` (`wahaLerMensagens`, `tratarRespostaAjustado`, `wahaEnviarTexto` com `chatId`), `scripts/check-st-fluxo-parse.mjs` | ✅ codada |
-| 3 | Lembrete "guia pedida há N dias sem retorno" (`lembrete_em`) e endpoints de intervenção (`GET /icms/st-fluxo`, `POST .../manual`, `POST .../reenviar`) | controller + tela | pendente, não bloqueia |
+| 3 | Lembrete de guia parada (`lembrar()`, a cada `ST_FLUXO_LEMBRETE_DIAS`, citando o aviso original) + endpoints: `GET /icms/st-fluxo[?estado=]`, `POST /icms/st-fluxo/exemplo` (manda as mensagens A, B e F com dados fictícios no grupo, mesmo em dry-run), `POST /icms/st-fluxo/:chave/manual`, `POST /icms/st-fluxo/:chave/reprocessar` | `st-fluxo.service.ts`, `icms.controller.ts` | ✅ codada (sem botões na tela: só o badge) |
 
 ## 5. Variáveis de ambiente
 
@@ -156,6 +156,7 @@ ST_FLUXO_ENABLED=true            # liga o fluxo (opt-in: fala com pessoas)
 ST_FLUXO_DRY_RUN=1               # 1 = monta as mensagens e só loga (primeiro teste)
 ST_FLUXO_JANELA_DIAS=7           # só NFs emitidas nos últimos N dias (evita spam no 1º deploy)
 ST_FLUXO_CRON=* * * * *
+ST_FLUXO_LEMBRETE_DIAS=3         # lembrete de guia a pedir/pedida sem PDF há N dias (repete a cada N)
 WAHA_GUIAS_CHAT_ID=              # grupo das guias (120363...@g.us); sem ele cai no WAHA_GROUP_CHAT_ID
 ```
 
@@ -169,7 +170,9 @@ Já existentes e reusadas: `WAHA_BASE_URL`, `WAHA_API_KEY`, `WAHA_SESSION`, `WAH
    fiscal-service e do cotacao-frontend.
 3. Conferir no log as mensagens montadas (`DRY-RUN WhatsApp: ...`) e o número de quem respondeu
    (campo `participant` do WAHA; se vier vazio, trocar o campo em `lerGrupo`).
-4. Tirar o `ST_FLUXO_DRY_RUN`.
+4. Ver o formato no grupo: `curl -X POST https://fiscal-service.acacessorios.local/api/icms/st-fluxo/exemplo`
+   (manda 3 mensagens fictícias + um aviso de que são exemplos).
+5. Tirar o `ST_FLUXO_DRY_RUN`.
 
 ## 7. Riscos e armadilhas
 

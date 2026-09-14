@@ -4,9 +4,37 @@ import type { FastifyReply } from 'fastify';
 import { ApiTags } from '@nestjs/swagger';
 import { FiscalConferenceRequestDto } from './dto/fiscal-conference.dto';
 import { FileInterceptor } from '../shared/http/fastify-file.interceptor';
+import { StFluxoService } from './st-fluxo.service';
 @Controller('icms')
 export class IcmsController {
-    constructor(private readonly service: IcmsService) { }
+    constructor(private readonly service: IcmsService, private readonly stFluxo: StFluxoService) { }
+
+    // ---- Fluxo automático de ICMS-ST (docs/automacao-icms-st.md) ----
+
+    /** Linhas do fluxo; `?estado=` filtra (NCM_PENDENTE, AGUARDANDO_ENVIO, ...). */
+    @Get('st-fluxo')
+    listStFluxo(@Query('estado') estado?: string) {
+        return this.stFluxo.listar(estado);
+    }
+
+    /** Manda no grupo das guias as mensagens do fluxo com dados fictícios (só para ver o formato). */
+    @Post('st-fluxo/exemplo')
+    exemploStFluxo() {
+        return this.stFluxo.enviarExemplos();
+    }
+
+    @Post('st-fluxo/:chaveNfe/manual')
+    async manualStFluxo(@Param('chaveNfe') chaveNfe: string, @Body() body: { usuario?: string }) {
+        await this.stFluxo.marcarManual(chaveNfe, body?.usuario);
+        return { ok: true };
+    }
+
+    /** Recalcula e reavisa (depois de vincular o produto no ERP, ou para sair de ERRO/MANUAL). */
+    @Post('st-fluxo/:chaveNfe/reprocessar')
+    async reprocessarStFluxo(@Param('chaveNfe') chaveNfe: string) {
+        await this.stFluxo.reprocessar(chaveNfe);
+        return { ok: true };
+    }
 
     @Get('nfe-distribuicao')
     async getInvoices(@Query('start') start?: string, @Query('end') end?: string) {
