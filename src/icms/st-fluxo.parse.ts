@@ -3,6 +3,18 @@
  * Funções puras, sem Nest: `node scripts/check-st-fluxo-parse.mjs` exercita todas.
  */
 export type Classificacao = 'ST' | 'DIFAL' | 'TRIBUTADA';
+
+/**
+ * Variável de ambiente sem comentário inline nem aspas: o painel do EasyPanel
+ * guarda `CHAVE=valor  # comentário` literalmente, e o valor sujo já derrubou
+ * o fluxo uma vez (WAHA 422, interruptor "true" não reconhecido).
+ */
+export function envLimpo(nome: string, padrao = ''): string {
+    const bruto = process.env[nome];
+    if (bruto === undefined) return padrao;
+    const semComentario = bruto.replace(/\s+#.*$/, '').trim().replace(/^["']|["']$/g, '');
+    return semComentario === '' ? padrao : semComentario;
+}
 export type Comando = 'AJUSTADO' | 'ENVIADO' | 'MANUAL' | 'CLASSIFICAR';
 
 const RE_AJUSTADO = /ajustad[oa]/i;

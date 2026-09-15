@@ -39,3 +39,18 @@ assert.deepEqual(parseClassificacao('5 st', [3, 7]), {}, 'item que não está pe
 assert.deepEqual(parseClassificacao('3 st', [3, 7]), { 3: 'ST' }, 'resposta parcial mantém o resto pendente');
 
 console.log('check-st-fluxo-parse: OK');
+
+// envLimpo(): valor colado com comentário/aspas no painel
+{
+    const { envLimpo } = createRequire(import.meta.url)(join(out, 'st-fluxo.parse.js'));
+    process.env.T_A = 'true            # liga o fluxo';
+    process.env.T_B = '120363413232728349@g.us  # grupo das guias';
+    process.env.T_C = '"7"';
+    process.env.T_D = '   ';
+    assert.equal(envLimpo('T_A'), 'true');
+    assert.equal(envLimpo('T_B'), '120363413232728349@g.us');
+    assert.equal(envLimpo('T_C'), '7');
+    assert.equal(envLimpo('T_D', 'padrao'), 'padrao');
+    assert.equal(envLimpo('T_NAO_EXISTE', 'x'), 'x');
+    console.log('envLimpo: OK');
+}

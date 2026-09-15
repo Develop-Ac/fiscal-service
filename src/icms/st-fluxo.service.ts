@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { IcmsService } from './icms.service';
 import { FiscalConferenceItemDto } from './dto/fiscal-conference.dto';
-import { Classificacao, comando, parseClassificacao, parseVencimento } from './st-fluxo.parse';
+import { Classificacao, comando, envLimpo, parseClassificacao, parseVencimento } from './st-fluxo.parse';
 
 /**
  * Fluxo automático do ICMS-ST/DIFAL de entrada (docs/automacao-icms-st.md).
@@ -35,12 +35,11 @@ export class StFluxoService {
 
     /** Um ciclo: NFs novas + reenvio de avisos que falharam. Nunca lança. */
     async processarCiclo(): Promise<void> {
-        const janelaDias = Number(process.env.ST_FLUXO_JANELA_DIAS) > 0 ? Number(process.env.ST_FLUXO_JANELA_DIAS) : 7;
+        const janelaDias = Number(envLimpo('ST_FLUXO_JANELA_DIAS')) > 0 ? Number(envLimpo('ST_FLUXO_JANELA_DIAS')) : 7;
         const novas = await this.prisma.$queryRawUnsafe<Array<{ chave_nfe: string }>>(
             `SELECT c.chave_nfe
                FROM com_nfe_conciliacao c
-              WHERE c.tipo_operacao = 0
-                AND LEFT(c.chave_nfe, 2) <> '51'
+              WHERE LEFT(c.chave_nfe, 2) <> '51'  -- NFE_DISTRIBUICAO só traz nota recebida (tipo_operacao 1 = saída do fornecedor)
                 AND c.mva_verificado_em IS NOT NULL
                 AND c.data_emissao >= NOW() - ($1 || ' days')::interval
                 AND NOT EXISTS (SELECT 1 FROM com_nfe_st_fluxo f WHERE f.chave_nfe = c.chave_nfe)
@@ -216,7 +215,7 @@ export class StFluxoService {
         });
         const texto = this.montarAviso(f, nf?.emitente ?? '-');
 
-        if (process.env.ST_FLUXO_DRY_RUN === '1') {
+        if (envLimpo('ST_FLUXO_DRY_RUN') === '1') {
             this.logger.log(`DRY-RUN WhatsApp:\n${texto}`);
             await this.gravar(f.chave_nfe, { waha_msg_aviso: 'dry-run' });
             return;
@@ -326,7 +325,7 @@ export class StFluxoService {
      * repete a cada N dias enquanto não fechar.
      */
     private async lembrar(): Promise<void> {
-        const dias = Number(process.env.ST_FLUXO_LEMBRETE_DIAS) > 0 ? Number(process.env.ST_FLUXO_LEMBRETE_DIAS) : 3;
+        const dias = Number(envLimpo('ST_FLUXO_LEMBRETE_DIAS')) > 0 ? Number(envLimpo('ST_FLUXO_LEMBRETE_DIAS')) : 3;
         const rows = await this.prisma.$queryRawUnsafe<any[]>(
             `SELECT *, EXTRACT(EPOCH FROM NOW() - COALESCE(autorizado_em, created_at)) / 86400 AS idade_dias
                FROM com_nfe_st_fluxo
@@ -338,7 +337,7 @@ export class StFluxoService {
         );
         for (const f of rows) {
             const texto = this.montarLembrete(f, Math.floor(Number(f.idade_dias)));
-            if (process.env.ST_FLUXO_DRY_RUN === '1') {
+            if (envLimpo('ST_FLUXO_DRY_RUN') === '1') {
                 this.logger.log(`DRY-RUN lembrete WhatsApp: ${texto}`);
             } else {
                 const replyTo = f.waha_msg_aviso && !['dry-run', 'ok'].includes(f.waha_msg_aviso) ? f.waha_msg_aviso : undefined;
@@ -382,7 +381,7 @@ export class StFluxoService {
      * sem tocar no banco. Nunca lança.
      */
     async processarRespostasWaha(): Promise<void> {
-        const auditoria = process.env.WAHA_GROUP_CHAT_ID;
+        const auditoria = envLimpo('WAHA_GROUP_CHAT_ID') || undefined;
         const guias = this.grupoGuias;
         const cmdGuias = ['ENVIADO', 'MANUAL', 'CLASSIFICAR'];
         if (auditoria && auditoria === guias) {
@@ -395,7 +394,7 @@ export class StFluxoService {
 
     /** Grupo do WhatsApp do fluxo de guias; sem WAHA_GUIAS_CHAT_ID cai no grupo da auditoria. */
     private get grupoGuias(): string | undefined {
-        return process.env.WAHA_GUIAS_CHAT_ID || process.env.WAHA_GROUP_CHAT_ID;
+        return envLimpo('WAHA_GUIAS_CHAT_ID') || envLimpo('WAHA_GROUP_CHAT_ID') || undefined;
     }
 
     private async lerGrupo(chatId: string, aceitos: Set<string>): Promise<void> {
@@ -498,7 +497,7 @@ export class StFluxoService {
 
     /** Resposta curta citando a mensagem da pessoa, no grupo de onde ela veio; em DRY-RUN só loga. */
     private async responder(texto: string, replyTo: string, chatId: string): Promise<void> {
-        if (process.env.ST_FLUXO_DRY_RUN === '1') {
+        if (envLimpo('ST_FLUXO_DRY_RUN') === '1') {
             this.logger.log(`DRY-RUN resposta WhatsApp (${replyTo}): ${texto}`);
             return;
         }

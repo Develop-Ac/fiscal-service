@@ -48,7 +48,7 @@ stateDiagram-v2
 ### 2.1 Chegada da NF (Fase 1)
 
 `st-fluxo.cron.ts` (1 min, só com `ST_FLUXO_ENABLED=true`) → `StFluxoService.processarCiclo()`.
-Poller na `com_nfe_conciliacao`: NF de **entrada** (`tipo_operacao = 0`), de **fora de MT** (chave
+Poller na `com_nfe_conciliacao`: NF de **fora de MT** (chave
 não começa com 51; dentro de MT o ST já vem retido pelo fornecedor), emitida nos últimos
 `ST_FLUXO_JANELA_DIAS` (7), com `mva_verificado_em` preenchido e **sem** linha em
 `com_nfe_st_fluxo`. NF que já tem `com_pagamento_guia` (alguém calculou na tela) entra como
@@ -166,6 +166,9 @@ FORA_DO_FLUXO). Não há modelo Prisma: tudo por `$queryRawUnsafe`, não precisa
 | 3 | Lembrete de guia parada (`lembrar()`, a cada `ST_FLUXO_LEMBRETE_DIAS`, citando o aviso original) + endpoints: `GET /icms/st-fluxo[?estado=]`, `POST /icms/st-fluxo/exemplo` (manda as mensagens A, B e F com dados fictícios no grupo, mesmo em dry-run), `POST /icms/st-fluxo/:chave/manual`, `POST /icms/st-fluxo/:chave/reprocessar` | `st-fluxo.service.ts`, `icms.controller.ts` | ✅ codada (sem botões na tela: só o badge) |
 
 ## 5. Variáveis de ambiente
+
+**Sem comentário na mesma linha do valor.** O painel do EasyPanel guarda `CHAVE=valor  # texto`
+literalmente; o código limpa isso (`envLimpo`), mas o resto do serviço não. Copie só `CHAVE=valor`.
 
 ```
 ST_FLUXO_ENABLED=true            # liga o fluxo (opt-in: fala com pessoas)
