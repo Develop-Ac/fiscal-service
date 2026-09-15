@@ -69,7 +69,7 @@ const CNPJ_RAIZ_PADRAO = env('GNRE_CNPJ_RAIZ', '07351198');
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-interface RegistroErp {
+export interface RegistroErp {
     numero: number;
     serie: string;
     empresa: number;
