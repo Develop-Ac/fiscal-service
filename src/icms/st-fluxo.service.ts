@@ -56,10 +56,13 @@ export class StFluxoService {
             }
         }
 
-        // Aviso que não saiu (WAHA fora, etc.): tenta de novo.
+        // Aviso que não saiu (WAHA fora, etc.): tenta de novo. Aviso feito em DRY-RUN
+        // conta como não enviado assim que o dry-run é desligado.
+        const dryRun = envLimpo('ST_FLUXO_DRY_RUN') === '1';
         const semAviso = await this.prisma.$queryRawUnsafe<any[]>(
             `SELECT * FROM com_nfe_st_fluxo
-              WHERE waha_msg_aviso IS NULL AND estado IN ('AGUARDANDO_ENVIO','NCM_PENDENTE')
+              WHERE (waha_msg_aviso IS NULL${dryRun ? '' : ` OR waha_msg_aviso = 'dry-run'`})
+                AND estado IN ('AGUARDANDO_ENVIO','NCM_PENDENTE')
               ORDER BY created_at LIMIT 20`,
         );
         for (const f of semAviso) {
