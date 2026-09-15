@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
-import * as Minio from 'minio';
 import { PrismaService } from '../prisma/prisma.service';
+import { minioClient } from '../shared/minio/minio-client';
 
 export interface EscDocumentoRow {
     id: number;
@@ -34,6 +34,7 @@ const TIPO_LABELS: Record<string, string> = {
     'comprovante-outros': 'Comprovante/Outros',
     'conta-consumo': 'Conta de consumo',
     'guia-icms-st': 'Guia ICMS-ST',
+    'guia-gnre': 'Guia GNRE (venda)',
 };
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -45,7 +46,7 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
  * do fiscal, então toda consulta restringe ao bucket fiscal — o nome segue o default
  * do escaner-fiscal-app (MINIO_BUCKET de lá) e pode ser sobreposto por env.
  */
-const BUCKET_FISCAL = (process.env.ESCANER_BUCKET_FISCAL || 'movimento-fiscal').trim();
+export const BUCKET_FISCAL = (process.env.ESCANER_BUCKET_FISCAL || 'movimento-fiscal').trim();
 
 /** Descrição vira sufixo do nome: sem acento, só [a-z0-9-], no máximo este tanto. */
 const DESCRICAO_MAX = 40;
@@ -127,7 +128,6 @@ export function nomesNoZip(entries: EntradaZip[]): string[] {
 export class EscanerService {
     private readonly logger = new Logger(EscanerService.name);
     private readonly minioBucket = process.env.MINIO_BUCKET || 'documentos';
-    private minioClient: Minio.Client | null = null;
 
     constructor(private readonly prisma: PrismaService) {}
 
@@ -240,8 +240,7 @@ export class EscanerService {
         const doc = rows[0];
         if (!doc?.minio_key) return null;
 
-        const client = this.getMinioClient();
-        const stream = await client.getObject(doc.minio_bucket || this.minioBucket, doc.minio_key);
+        const stream = await minioClient().getObject(doc.minio_bucket || this.minioBucket, doc.minio_key);
         const fileName = String(doc.nome_arquivo || `documento-${idNum}.pdf`);
         return { stream, fileName };
     }
@@ -291,36 +290,7 @@ export class EscanerService {
     }
 
     getObjectStream(bucket: string, key: string) {
-        return this.getMinioClient().getObject(bucket, key);
-    }
-
-    // -------- MinIO (mesmas envs do restante do serviço) --------
-    private getMinioClient() {
-        if (this.minioClient) return this.minioClient;
-
-        const rawEndpoint = String(process.env.MINIO_ENDPOINT || '').trim();
-        const accessKey = process.env.MINIO_ACCESS_KEY;
-        const secretKey = process.env.MINIO_SECRET_KEY;
-        if (!rawEndpoint || !accessKey || !secretKey) {
-            throw new Error(
-                'Configuração MinIO incompleta: MINIO_ENDPOINT, MINIO_ACCESS_KEY e MINIO_SECRET_KEY são obrigatórios.',
-            );
-        }
-
-        let endPoint = rawEndpoint;
-        let port = Number(process.env.MINIO_PORT || 9000);
-        let useSSL = String(process.env.MINIO_USE_SSL || 'false').toLowerCase() === 'true';
-
-        if (/^https?:\/\//i.test(rawEndpoint)) {
-            const url = new URL(rawEndpoint);
-            endPoint = url.hostname;
-            if (url.port) port = Number(url.port);
-            else if (!process.env.MINIO_PORT) port = url.protocol === 'https:' ? 443 : 80;
-            if (!process.env.MINIO_USE_SSL) useSSL = url.protocol === 'https:';
-        }
-
-        this.minioClient = new Minio.Client({ endPoint, port, useSSL, accessKey, secretKey });
-        return this.minioClient;
+        return minioClient().getObject(bucket, key);
     }
 
     /** Instalações sem o DDL do scan aplicado: devolve vazio em vez de 500. */

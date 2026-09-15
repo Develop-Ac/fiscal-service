@@ -30,6 +30,7 @@
         "class-validator": "^0.14.0",
         "cors": "^2.8.5",
         "dotenv": "^16.0.0",
+        "fast-xml-parser": "^5.7.1",
         "minio": "^8.0.7",
         "mssql": "^10.0.0",
         "node-forge": "^1.4.0",

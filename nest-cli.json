@@ -5,7 +5,8 @@
     "compilerOptions": {
         "deleteOutDir": true,
         "assets": [
-            { "include": "nfse/danfse/assets/**/*", "outDir": "dist", "watchAssets": true }
+            { "include": "nfse/danfse/assets/**/*", "outDir": "dist", "watchAssets": true },
+            { "include": "gnre/assets/**/*", "outDir": "dist", "watchAssets": true }
         ]
     }
 }
