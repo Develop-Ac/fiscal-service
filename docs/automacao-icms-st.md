@@ -70,7 +70,8 @@ alguém tivesse calculado, mais o badge do estado do fluxo (campo `fluxo` do
 `GET /icms/payment-status`).
 
 Valor da guia = ST líquida dos itens ST + `vlDifal` dos itens DIFAL, a mesma conta da tela;
-"tem guia" quando passa de R$ 0,05 (regra da tela). `valorPagoAMais` entra na mensagem como
+"tem guia" só acima de `GUIA_TOLERANCIA_BRL` (R$ 10): até isso a NF fica "Sem Guia - Verificado". A regra
+mora em `savePaymentStatus()`, então vale também para quem calcula pela tela. `valorPagoAMais` entra na mensagem como
 **excedente**, sem guia. Item ST com NCM fora da tabela usa o **MVA padrão 50,39%** e a mensagem
 diz quantos foram.
 

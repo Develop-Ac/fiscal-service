@@ -3843,6 +3843,13 @@ export class IcmsService {
             }
         }
 
+        // Regra da empresa: guia até GUIA_TOLERANCIA_BRL (R$ 10) não se recolhe.
+        // Vale para a tela e para o fluxo automático, por isso mora aqui.
+        const tolGuia = Number(process.env.GUIA_TOLERANCIA_BRL) > 0 ? Number(process.env.GUIA_TOLERANCIA_BRL) : 10;
+        if (dto.observacoes === 'Tem Guia Complementar' && (dto.valor || 0) <= tolGuia) {
+            dto.observacoes = 'Sem Guia - Verificado';
+        }
+
         const result = await this.prisma.pagamentoGuia.upsert({
             where: { chave_nfe: dto.chaveNfe },
             create: {

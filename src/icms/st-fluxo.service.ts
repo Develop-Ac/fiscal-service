@@ -186,7 +186,9 @@ export class StFluxoService {
         const excedente = Number(st.reduce((a, i) => a + (i.valorPagoAMais || 0), 0).toFixed(2));
         const itensPadrao = st.filter((i) => i.matchType === 'Não Encontrado').length;
         const tipos = [st.length && 'ICMS ST', difal.length && 'DIFAL', dto.some((d) => d.impostoEscolhido === 'TRIBUTADA') && 'Tributada'].filter(Boolean);
-        const temGuia = total > 0.05;
+        // Até GUIA_TOLERANCIA_BRL (R$ 10) não se recolhe guia: fica "Sem Guia - Verificado".
+        const tol = Number(envLimpo('GUIA_TOLERANCIA_BRL')) > 0 ? Number(envLimpo('GUIA_TOLERANCIA_BRL')) : 10;
+        const temGuia = total > tol;
 
         await this.icms.savePaymentStatus({
             chaveNfe: chave,
