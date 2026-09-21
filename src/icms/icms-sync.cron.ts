@@ -19,11 +19,15 @@ import { IcmsService } from './icms.service';
  *  - NFE_SYNC_CRON: expressão cron (default a cada 1 min).
  *  - NFE_SYNC_DIAS: janela de dias para trás (default 30).
  *  - NFE_SYNC_CRON_DISABLED=true: desliga o disparo periódico.
+ *  - NFE_ESTOQUE_CRON: cron da entrada no estoque, empresa 3 (default a cada 10 min).
+ *  - NFE_ESTOQUE_DIAS: até quantos dias após a entrada fiscal a nota é procurada
+ *    na empresa 3 (default 45).
  */
 @Injectable()
 export class IcmsSyncCron {
   private readonly logger = new Logger(IcmsSyncCron.name);
   private rodando = false;
+  private rodandoEstoque = false;
 
   constructor(private readonly icms: IcmsService) {}
 
@@ -51,6 +55,25 @@ export class IcmsSyncCron {
       );
     } finally {
       this.rodando = false;
+    }
+  }
+
+  /** Entrada no estoque (empresa 3) das notas já lançadas — ver `syncEntradaEstoque`. */
+  @Cron(process.env.NFE_ESTOQUE_CRON || '*/10 * * * *', { name: 'nfe-entrada-estoque' })
+  async entradaEstoque() {
+    if (process.env.NFE_SYNC_CRON_DISABLED === 'true' || this.rodandoEstoque) return;
+    this.rodandoEstoque = true;
+    try {
+      const raw = Number(process.env.NFE_ESTOQUE_DIAS);
+      const dias = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 45;
+      const gravadas = await this.icms.syncEntradaEstoque(dias);
+      if (gravadas > 0) this.logger.log(`Entrada no estoque (empresa 3): ${gravadas} nota(s) gravada(s).`);
+    } catch (err) {
+      this.logger.error(
+        `Falha ao sincronizar entrada no estoque: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      this.rodandoEstoque = false;
     }
   }
 

@@ -932,21 +932,59 @@ export class IcmsService {
      * Retorna um Map<CHAVE_NFE, DT_ENTRADA | null>; chaves AUSENTES no Map
      * significam que a nota não está na NF_ENTRADA (ou seja, foi excluída).
      */
-    async fetchNfEntradaDatesByKeys(keys: string[]): Promise<Map<string, Date | null>> {
+    async fetchNfEntradaDatesByKeys(keys: string[], empresa = 1): Promise<Map<string, Date | null>> {
         if (!keys.length) return new Map();
         return this.erpApi.comFallback(
-            () => this.fetchNfEntradaDatesByKeysViaApi(keys),
-            () => this.fetchNfEntradaDatesByKeysViaOpenQuery(keys),
+            () => this.fetchNfEntradaDatesByKeysViaApi(keys, empresa),
+            () => this.fetchNfEntradaDatesByKeysViaOpenQuery(keys, empresa),
         );
     }
 
-    private async fetchNfEntradaDatesByKeysViaApi(keys: string[]): Promise<Map<string, Date | null>> {
+    /**
+     * ENTRADA NO ESTOQUE — o lançamento da mesma NF-e na EMPRESA 3.
+     *
+     * A nota de compra é lançada duas vezes no ERP, com a mesma chave: na empresa 1
+     * (entrada fiscal: a mercadoria foi RECEBIDA) e, depois da conferência do
+     * recebimento, na empresa 3 (os produtos entraram no ESTOQUE). `status_erp` e
+     * `dt_entrada` espelham só a primeira; esta rotina grava a segunda em
+     * `dt_entrada_estoque`, que é o que encerra a chegada no painel do recebimento.
+     *
+     * Só olha notas LANCADA ainda sem a data, com entrada fiscal dentro da janela:
+     * nota de uso e consumo nunca vai à empresa 3, e sem o corte ela seria
+     * reconsultada para sempre.
+     */
+    async syncEntradaEstoque(dias: number): Promise<number> {
+        const pendentes = await this.prisma.nfeConciliacao.findMany({
+            where: {
+                status_erp: 'LANCADA',
+                dt_entrada_estoque: null,
+                dt_entrada: { gte: new Date(Date.now() - dias * 24 * 60 * 60 * 1000) },
+            },
+            select: { chave_nfe: true },
+        });
+        if (!pendentes.length) return 0;
+
+        const entradas = await this.fetchNfEntradaDatesByKeys(pendentes.map((p) => p.chave_nfe), 3);
+        let gravadas = 0;
+        for (const [chave, dt] of entradas) {
+            // Lançada sem DT_ENTRADA não tem o que gravar: a coluna É a data.
+            if (!dt) continue;
+            await this.prisma.nfeConciliacao.update({
+                where: { chave_nfe: chave },
+                data: { dt_entrada_estoque: dt, updated_at: new Date() },
+            });
+            gravadas += 1;
+        }
+        return gravadas;
+    }
+
+    private async fetchNfEntradaDatesByKeysViaApi(keys: string[], empresa: number): Promise<Map<string, Date | null>> {
         const result = new Map<string, Date | null>();
         // O lote é menor que o do OPENQUERY: a rota limita a lista de chaves,
         // e o filtro de STATUS = 1 (lançada) já vem aplicado do outro lado.
         for (let i = 0; i < keys.length; i += ErpApiService.LOTE_CHAVES) {
             const lote = keys.slice(i, i + ErpApiService.LOTE_CHAVES);
-            for (const row of await this.erpApi.nfEntradaPorChaves(lote)) {
+            for (const row of await this.erpApi.nfEntradaPorChaves(lote, empresa)) {
                 const chave = String(row.CHAVE_NFE || '').trim();
                 if (!chave) continue;
                 const dt = row.DT_ENTRADA ? new Date(row.DT_ENTRADA) : null;
@@ -956,7 +994,7 @@ export class IcmsService {
         return result;
     }
 
-    private async fetchNfEntradaDatesByKeysViaOpenQuery(keys: string[]): Promise<Map<string, Date | null>> {
+    private async fetchNfEntradaDatesByKeysViaOpenQuery(keys: string[], empresa: number): Promise<Map<string, Date | null>> {
         const result = new Map<string, Date | null>();
         if (!keys.length) return result;
 
@@ -974,7 +1012,7 @@ export class IcmsService {
           E.CHAVE_NFE,
           E.DT_ENTRADA
       FROM NF_ENTRADA E
-      WHERE E.EMPRESA = 1
+      WHERE E.EMPRESA = ${Number(empresa)}
         AND E.STATUS = 1
         AND E.CHAVE_NFE IN (${inList})
     `;

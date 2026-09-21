@@ -34,6 +34,9 @@ model NfeConciliacao {
   // Data de entrada confirmada na NF_ENTRADA do ERP (preenchida ao confirmar lançamento)
   dt_entrada     DateTime?
 
+  // Entrada da MESMA nota na empresa 3: conferida pelo recebimento, produto no estoque
+  dt_entrada_estoque DateTime?
+
   // Operation Details
   tipo_operacao       Int    @default(0) // 0 - Entrada, 1 - Saída
   tipo_operacao_desc  String @default("ENTRADA PRÓPRIA")
