@@ -12,6 +12,9 @@ model PagamentoGuia {
   data_pagamento DateTime @default(now())
   valor          Float    @default(0.0)
   observacoes    String   @default("")
+  // Tarefa "Anexar guia…" no Meu dia (avisos-service): criada / concluída ao anexar a guia
+  tarefa_criada_em    DateTime? @db.Timestamptz(6)
+  tarefa_concluida_em DateTime? @db.Timestamptz(6)
 
   @@map("com_pagamento_guia")
 }

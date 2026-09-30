@@ -207,3 +207,39 @@ Já existentes e reusadas: `WAHA_BASE_URL`, `WAHA_API_KEY`, `WAHA_SESSION`, `WAH
   antes de perguntar (30 linhas).
 - **Nunca marca "enviado" antes do fato**: aviso só grava o id com resposta ok do WAHA; falha
   volta no próximo ciclo.
+
+## 8. Tarefa "Anexar guia…" no Meu dia
+
+Especificação: `Develop-Ac/avisos-service` → `docs/spec-tarefas-do-sistema.md`. Toda NF salva com
+"Tem Guia Complementar" (tela ou robô, ambos passam por `savePaymentStatus`) vira tarefa pessoal no
+Meu dia do responsável da regra `fiscal.guia_st` (avisos-service, Avisos › Configuração: usuário,
+prazo em dias úteis, etiqueta). Código: `src/icms/tarefas-guia.client.ts`, `tarefas-guia.cron.ts`;
+teste: `node scripts/check-tarefas-guia.mjs`.
+
+- **Criar**: título `Anexar guia <ICMS-ST|DIFAL|ICMS-ST/DIFAL> — NF <número> — <EMITENTE> — R$ <valor>`,
+  obs com tipo de imposto, itens ST/DIFAL e "Avisado no grupo em dd/mm" (quando o robô já mandou o
+  aviso), link `/fiscal/nfe/<chave>`. Se a guia já estiver anexada, não cria.
+- **Cancelar**: salvamento com qualquer outro resultado ("Sem guia", "Tributado") cancela a tarefa aberta.
+- **Concluir**: ciclo de 1 min pega `com_pagamento_guia` com `tarefa_criada_em` e sem
+  `tarefa_concluida_em` cuja NF tem guia (`com_nfe_guia_pdf` ou `esc_documento` `guia-icms-st`).
+  Não altera `com_nfe_st_fluxo`; guia removida depois não reabre a tarefa.
+- Falha do avisos-service (timeout 8 s, HTTP ≠ 2xx) só gera aviso no log; o cálculo é salvo igual.
+
+Variáveis (sem elas a funcionalidade fica desligada, com um aviso no log):
+
+```
+AVISOS_SERVICE_URL=http://avisos-service.acacessorios.local
+APP_TOKEN=                       # o MESMO valor do APP_TOKEN do avisos-service (header x-app-token)
+```
+
+Subir: aplicar `sql/2026-10-01_tarefas_guia.sql` (colunas `tarefa_criada_em`/`tarefa_concluida_em`)
+depois do SQL 008 do avisos-service; envs acima; deploy. Carga inicial, uma vez:
+
+```
+curl -X POST "https://fiscal-service.acacessorios.local/api/icms/tarefas-guia/carga?dias=15&dry=1"   # confere a lista
+curl -X POST "https://fiscal-service.acacessorios.local/api/icms/tarefas-guia/carga?dias=15"         # cria
+```
+
+Resposta `{total, criadas, lista:[{chave, titulo, base}]}`. `base` (início do prazo) = dia do aviso
+do robô (`com_nfe_st_fluxo.created_at`) ou do cálculo; as vencidas já nascem atrasadas. Rodar de
+novo não duplica (só entra NF com `tarefa_criada_em` vazio).

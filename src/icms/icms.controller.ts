@@ -5,9 +5,25 @@ import { ApiTags } from '@nestjs/swagger';
 import { FiscalConferenceRequestDto } from './dto/fiscal-conference.dto';
 import { FileInterceptor } from '../shared/http/fastify-file.interceptor';
 import { StFluxoService } from './st-fluxo.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { cargaTarefasGuia } from './tarefas-guia.client';
 @Controller('icms')
 export class IcmsController {
-    constructor(private readonly service: IcmsService, private readonly stFluxo: StFluxoService) { }
+    constructor(
+        private readonly service: IcmsService,
+        private readonly stFluxo: StFluxoService,
+        private readonly prisma: PrismaService,
+    ) { }
+
+    /**
+     * Carga inicial das tarefas "Anexar guia…" no Meu dia (uma vez, depois do deploy): NFs "Tem guia"
+     * calculadas nos últimos `dias` (padrão 15), sem guia anexada e sem tarefa. `dry=1` só lista.
+     */
+    @Post('tarefas-guia/carga')
+    cargaTarefasGuia(@Query('dias') dias?: string, @Query('dry') dry?: string) {
+        const n = Number(dias);
+        return cargaTarefasGuia(this.prisma, Number.isInteger(n) && n > 0 ? Math.min(n, 90) : 15, dry === '1' || dry === 'true');
+    }
 
     // ---- Fluxo automático de ICMS-ST (docs/automacao-icms-st.md) ----
 

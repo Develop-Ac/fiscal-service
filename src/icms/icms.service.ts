@@ -3,6 +3,7 @@ import { OpenQueryService } from '../shared/database/openquery/openquery.service
 import { ErpApiService } from '../shared/erp-api/erp-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SimplesNacionalService } from './simples-nacional.service';
+import { tarefaAoSalvarPagamento } from './tarefas-guia.client';
 import * as xml2js from 'xml2js';
 import * as zlib from 'zlib'; // for gzip
 import { randomUUID } from 'crypto';
@@ -3912,6 +3913,10 @@ export class IcmsService {
                 data: { tipo_imposto: dto.tipo_imposto }
             }).catch(e => this.logger.error("Error updating tipo_imposto in NfeConciliacao", e));
         }
+
+        // Tarefa "Anexar guia…" no Meu dia do responsável (avisos-service): cria com "Tem guia",
+        // cancela com qualquer outro resultado. Nunca derruba o salvamento (tela e robô passam aqui).
+        await tarefaAoSalvarPagamento(this.prisma, dto);
 
         await fetch('http://log-service.acacessorios.local/log', {
             method: 'POST',
