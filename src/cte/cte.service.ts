@@ -611,14 +611,16 @@ export class CteService {
   // =====================================================================
 
   private async decodeXml(content: any): Promise<string> {
-    const c = String(content || '').trim();
-    if (!c) return '';
-    if (c.startsWith('<')) return c;
-    try {
-      return zlib.gunzipSync(Buffer.from(c, 'base64')).toString('utf-8');
-    } catch {
-      return c;
+    let c = String(content || '').trim();
+    // Mesmo caso do icms.service: o ERP às vezes aplica gzip+base64 duas vezes.
+    for (let i = 0; i < 5 && c && !c.startsWith('<'); i++) {
+      try {
+        c = zlib.gunzipSync(Buffer.from(c, 'base64')).toString('utf-8').trim();
+      } catch {
+        break;
+      }
     }
+    return c;
   }
 
   private encodeXml(xml: string): string {

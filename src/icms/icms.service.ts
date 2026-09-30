@@ -1079,16 +1079,19 @@ export class IcmsService {
 
     // --- XML UTILS ---
     async decodeXml(content: string): Promise<string> {
-        if (!content) return "";
-        content = content.trim();
-        if (content.startsWith('<')) return content;
-
-        try {
-            const buffer = Buffer.from(content, 'base64');
-            return zlib.gunzipSync(buffer).toString('utf-8');
-        } catch (e) {
-            return content; // Fallback
+        let c = String(content || '').trim();
+        // O ERP às vezes grava o XML_COMPLETO com gzip+base64 aplicado DUAS vezes
+        // (o XML_RESUMO da mesma nota vem com uma). Descascando só uma camada sobra
+        // base64 sem '<': o parser não acha <xNome> e a nota vira "Desconhecido".
+        // Descasca até virar XML; teto de 5 evita laço em conteúdo inválido.
+        for (let i = 0; i < 5 && c && !c.startsWith('<'); i++) {
+            try {
+                c = zlib.gunzipSync(Buffer.from(c, 'base64')).toString('utf-8').trim();
+            } catch {
+                break; // não é gzip+base64: devolve como está
+            }
         }
+        return c;
     }
 
     private encodeXml(xml: string): string {
