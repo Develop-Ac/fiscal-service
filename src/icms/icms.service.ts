@@ -3071,8 +3071,6 @@ export class IcmsService {
              FROM com_nfe_conciliacao_item WHERE chave_nfe = $1`,
             chaveNfe,
         );
-        const confByItem = new Map<number, any>();
-        for (const c of conf) confByItem.set(Number(c.n_item), c);
         const semConferencia = conf.length === 0;
 
         const intra = this.isWithinMtByChave(chaveNfe);
@@ -3103,6 +3101,18 @@ export class IcmsService {
             const rules = await this.getFiscalRules();
             const notaByItem = new Map<number, any>();
             for (const it of nota.itens) notaByItem.set(it.nItem, it);
+            // O ERP renumera os itens na importação (ITEM segue a ordem dele, não o
+            // nItem do XML): casar por número trocava o produto e acusava origem
+            // errada (NF 250398: ITEM 1 do ERP = item 9 do XML). Casa pelo produto
+            // via conciliação (n_item do XML → pro_codigo); sem vínculo, a origem
+            // sai do CST da nota que o próprio ERP guarda no item (ei.CST).
+            // ponytail: produto repetido na mesma NF fica com o 1º nItem; casar por
+            // cProd/quantidade se aparecer.
+            const confByPro = new Map<string, any>();
+            for (const c of conf) {
+                const pro = String(c.pro_codigo ?? '').trim();
+                if (pro && !confByPro.has(pro)) confByPro.set(pro, c);
+            }
 
             // OPF_CODIGO só DETERMINA a destinação (revenda x uso/consumo) das
             // notas intra; não entra como item de conferência.
@@ -3117,8 +3127,10 @@ export class IcmsService {
                 const proCodigo = String(ei.PRO_CODIGO ?? '');
                 const cfopLanc = this.digitsOnly(ei.CFOP);
                 const cstFiscalLanc = this.digitsOnly(ei.CST_FISCAL).padStart(3, '0');
-                const notaItem = notaByItem.get(nItem);
-                const cItem = confByItem.get(nItem);
+                const cItem = confByPro.get(proCodigo);
+                const notaItem = cItem ? notaByItem.get(Number(cItem.n_item)) : undefined;
+                const cstNotaErp = this.digitsOnly(ei.CST);
+                const origemNota = notaItem?.origemNota || (cstNotaErp.length === 3 ? cstNotaErp.slice(0, 1) : '');
                 const checks: Chk[] = [];
                 const prod = proCodigo ? await this.findInternalProduct(proCodigo, !!opts.produtoDireto) : null;
                 const descricao = prod?.PRO_DESCRICAO ?? null;
@@ -3172,8 +3184,8 @@ export class IcmsService {
                     const enc = cstFiscalLanc ? cstFiscalLanc.slice(-2) : '';
                     checks.push({ campo: 'CST final', esperado: cstFinalExp, encontrado: enc, ok: !enc || enc === cstFinalExp });
                 }
-                if (notaItem?.origemNota && cstFiscalLanc.length === 3) {
-                    const origemExp = rules.origem.get(notaItem.origemNota) ?? this.origemEsperada(notaItem.origemNota);
+                if (origemNota && cstFiscalLanc.length === 3) {
+                    const origemExp = rules.origem.get(origemNota) ?? this.origemEsperada(origemNota);
                     const enc = cstFiscalLanc.slice(0, 1);
                     checks.push({ campo: 'CST origem', esperado: origemExp, encontrado: enc, ok: enc === origemExp });
                 }
