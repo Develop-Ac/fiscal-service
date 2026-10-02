@@ -1882,7 +1882,8 @@ export class IcmsService {
             );
         }
 
-        const isMonofasico = this.isMonofasicoNcm(normalizedNcm);
+        // NCM do cadastro manda; o da nota é só reserva (ver auditoria).
+        const isMonofasico = this.isMonofasicoNcm(this.cleanDigits(produtoInterno?.NCM ?? '') || normalizedNcm);
         const pisEsperado = isMonofasico ? '04' : 'P01';
         const cofinsEsperado = isMonofasico ? '04' : 'C01';
 
@@ -2209,7 +2210,8 @@ export class IcmsService {
                 COFINS_CODIGO,
                 COMERCIALIZAVEL,
                 SUBGRP_CODIGO,
-                CEST
+                CEST,
+                NCM
             FROM [BI].[dbo].[Stage_Produtos]
             WHERE PRO_CODIGO = @proCodigo
             `,
@@ -2240,7 +2242,7 @@ export class IcmsService {
         const firebirdSql = `
       SELECT FIRST 1
           PRO_CODIGO, PRO_DESCRICAO, ST_CODIGO, SUBTIPO,
-          PIS_CODIGO, COFINS_CODIGO, COMERCIALIZAVEL, SUBGRP_CODIGO, CEST
+          PIS_CODIGO, COFINS_CODIGO, COMERCIALIZAVEL, SUBGRP_CODIGO, CEST, NCM
       FROM PRODUTOS
       WHERE EMPRESA = 1 AND PRO_CODIGO = ${code}
     `;
@@ -3159,7 +3161,11 @@ export class IcmsService {
                 if (destSubtipo) destinacao = destSubtipo;
                 else if (intra && destinacaoIntra) destinacao = destinacaoIntra;
 
-                const monofasico = this.isMonofasicoNcm(this.cleanDigits(notaItem?.ncm ?? ''));
+                // Monofásico é atributo do PRODUTO (NCM do cadastro), não do que o
+                // emitente escreveu no XML: devolução de cliente vem com NCM errado e
+                // nota sem conferência nem casa com o XML (ncm vazio => "não mono"),
+                // o que acusava P01/C01 em cadastro 04 correto (NF 91480, 31 falsos).
+                const monofasico = this.isMonofasicoNcm(this.cleanDigits(prod?.NCM ?? notaItem?.ncm ?? ''));
                 const reg = this.regraEsperada(rules, imposto!, destinacao!, monofasico);
 
                 // CFOP/CST esperados: 1º pelas regras por CFOP do fornecedor (norma MT,
